@@ -1,4 +1,4 @@
-# LLM 回應品質分類系統 ReadMe
+# LLM 回應品質分類系統
 
 本組 final project 旨在參加 [Kaggle「LLM Classification Fine-Tuning」](https://www.kaggle.com/competitions/llm-classification-finetuning)競賽，目標是透過微調大型語言模型，建立一套能對不同回應進行優劣評比的自動分類系統，並另行開發一個使用者介面（UI），讓最終使用者能輸入任意問題，系統自動產生兩個不同的回應選項，使用者可自行判斷哪個回應較佳，最後將使用者的選擇與模型的自動判斷進行比較，以評估模型的實用性與一致性。
 
