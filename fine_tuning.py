@@ -40,7 +40,7 @@ class Config:
     def __init__(self):
         # --- Basic Settings ---
         self.MODEL_NAME = 'distilbert-base-uncased'
-        self.QUICK_TEST = False  # Set to True for a quick run with a subset of data
+        self.QUICK_TEST = True  # Set to True for a quick run with a subset of data
         self.QUICK_TEST_SIZE = 2000
         self.RANDOM_STATE = 42
         
@@ -279,11 +279,13 @@ class PipelineModules:
             logits, labels = eval_pred
             probabilities = torch.nn.functional.softmax(torch.from_numpy(logits), dim=-1).numpy()
             preds = np.argmax(logits, axis=-1)
-            
             accuracy = accuracy_score(labels, preds)
-            logloss = log_loss(labels, probabilities, eps=1e-7)
-            
+            probabilities = np.clip(probabilities, 1e-7, 1 - 1e-7)
+            logloss = log_loss(labels, probabilities)
+            pred_dist = np.bincount(preds, minlength=3)
+            print(f"Distribution: {pred_dist}, LogLoss: {logloss:.6f}")
             return {"accuracy": accuracy, "log_loss": logloss}
+ 
         
         # Reinitialize classifier layer weights
         if hasattr(model, 'classifier'):
@@ -424,7 +426,9 @@ def main():
     print("\nRunning final validation...")
     val_preds = trainer.predict(val_dataset)
     val_probs = torch.nn.functional.softmax(torch.from_numpy(val_preds.predictions), dim=-1).numpy()
-    val_final_loss = log_loss(val_labels, val_probs, eps=1e-7)
+    val_probabilities = torch.nn.functional.softmax(torch.from_numpy(val_preds.predictions), dim=-1).numpy()
+    val_probabilities = np.clip(val_probabilities, 1e-7, 1 - 1e-7)
+    val_final_loss = log_loss(val_labels, val_probabilities)
     val_final_acc = accuracy_score(val_labels, np.argmax(val_probs, axis=1))
 
     print(f"\n{'='*60}")
