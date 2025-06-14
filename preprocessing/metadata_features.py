@@ -1,43 +1,22 @@
 # Metadata Features Extraction Module
 # ===================================
-# 提取和計算基於數據分析確認的三個核心元數據特徵
-# 這些特徵具有強信號且不受語言限制
+# 提取和計算四個核心元數據特徵
+# 這些特徵具有強信號且能有效區分回答質量
 
 import pandas as pd
 import numpy as np
-import string
+import re
 from typing import Dict, List, Tuple
 
 class MetadataFeatures:
     """
-    元數據特徵提取類，提供三個核心特徵的計算方法
+    元數據特徵提取類，提供四個核心特徵的計算方法
     """
-    
-    @staticmethod
-    def calculate_punctuation_variety(text: str) -> int:
-        """
-        計算標點符號多樣性 - 統計文本中不同標點符號的種類數量
-        
-        Args:
-            text (str): 輸入文本
-            
-        Returns:
-            int: 不同標點符號的種類數量
-        """
-        if not isinstance(text, str):
-            return 0
-        
-        # 獲取所有標點符號
-        punctuation_chars = set(string.punctuation)
-        # 計算文本中出現的不同標點符號
-        found_punctuation = set(char for char in text if char in punctuation_chars)
-        
-        return len(found_punctuation)
     
     @staticmethod
     def calculate_jaccard_similarity(text1: str, text2: str) -> float:
         """
-        計算字元級 Jaccard 相似度 - 衡量兩個文本的字元重疊程度
+        計算 Jaccard Index - 衡量兩個文本的字元重疊程度
         
         Args:
             text1 (str): 第一個文本
@@ -45,17 +24,17 @@ class MetadataFeatures:
             
         Returns:
             float: Jaccard 相似度 (0-1之間)
-        """
+        """        
         if not isinstance(text1, str) or not isinstance(text2, str):
             return 0.0
         
-        # 轉換為字元集合
-        set1 = set(text1.lower())
-        set2 = set(text2.lower())
+        # 轉換為字詞集合 (以空格分割)
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
         
         # 計算交集和聯集
-        intersection = len(set1.intersection(set2))
-        union = len(set1.union(set2))
+        intersection = len(words1.intersection(words2))
+        union = len(words1.union(words2))
         
         # 避免除以零
         if union == 0:
@@ -64,34 +43,123 @@ class MetadataFeatures:
         return intersection / union
     
     @staticmethod
-    def calculate_length_ratio(text1: str, text2: str) -> float:
+    def count_code_blocks(text: str) -> int:
         """
-        計算長度比例 - 較長文本與較短文本的長度比值
+        計算 markdown 格式的程式碼區塊數量
         
         Args:
-            text1 (str): 第一個文本
-            text2 (str): 第二個文本
+            text (str): 輸入文本
             
         Returns:
-            float: 長度比例 (>=1.0)
+            int: 程式碼區塊數量
+        """
+        if not isinstance(text, str):
+            return 0
+        
+        return str(text).count('```') // 2
+    
+    @staticmethod
+    def calculate_code_blocks_diff(text1: str, text2: str) -> int:
+        """
+        計算 markdown 格式的程式碼區塊數量差值
+        
+        Args:
+            text1 (str): 第一個文本 (response_a)
+            text2 (str): 第二個文本 (response_b)
+            
+        Returns:
+            int: 程式碼區塊數量差值 (response_a - response_b)
+        """
+        count1 = MetadataFeatures.count_code_blocks(text1)
+        count2 = MetadataFeatures.count_code_blocks(text2)
+        return count1 - count2
+    
+    @staticmethod
+    def calculate_length_diff(text1: str, text2: str) -> int:
+        """
+        計算回應長度差值
+        
+        Args:
+            text1 (str): 第一個文本 (response_a)
+            text2 (str): 第二個文本 (response_b)
+            
+        Returns:
+            int: 長度差值 (response_a - response_b)
         """
         if not isinstance(text1, str) or not isinstance(text2, str):
-            return 1.0
+            return 0
         
-        len1 = len(text1)
-        len2 = len(text2)
+        return len(text1) - len(text2)
+    
+    @staticmethod
+    def calculate_ttr(text: str) -> float:
+        """
+        計算 Type-Token Ratio (TTR) - 詞彙豐富度指標
         
-        # 避免除以零
-        if min(len1, len2) == 0:
-            return float('inf') if max(len1, len2) > 0 else 1.0
+        Args:
+            text (str): 輸入文本
+            
+        Returns:
+            float: TTR 值 (0-1之間)
+        """
+        if not isinstance(text, str) or len(text.strip()) == 0:
+            return 0.0
         
-        # 返回較長者除以較短者
-        return max(len1, len2) / min(len1, len2)
+        # 分詞並轉為小寫
+        words = text.lower().split()
+        
+        if len(words) == 0:
+            return 0.0
+        
+        # 計算不重複詞彙數量 / 總詞彙數量
+        unique_words = len(set(words))
+        total_words = len(words)
+        
+        return unique_words / total_words
+    
+    @staticmethod
+    def calculate_ttr_diff(text1: str, text2: str) -> float:
+        """
+        計算 TTR 差值
+        
+        Args:
+            text1 (str): 第一個文本 (response_a)
+            text2 (str): 第二個文本 (response_b)
+            
+        Returns:
+            float: TTR 差值 (response_a - response_b)
+        """        
+        ttr1 = MetadataFeatures.calculate_ttr(text1)
+        ttr2 = MetadataFeatures.calculate_ttr(text2)
+        return ttr1 - ttr2
+    
+    @staticmethod
+    def extract_core_features(row: pd.Series) -> Dict[str, float]:
+        """
+        提取四個核心元數據特徵
+        
+        Args:
+            row (pd.Series): 包含 prompt, response_a, response_b 的數據行
+            
+        Returns:
+            Dict[str, float]: 包含四個核心特徵的字典
+        """
+        response_a = str(row.get('response_a', ''))
+        response_b = str(row.get('response_b', ''))
+        
+        core_features = {
+            'jaccard_index': MetadataFeatures.calculate_jaccard_similarity(response_a, response_b),
+            'code_blocks_diff': MetadataFeatures.calculate_code_blocks_diff(response_a, response_b),
+            'length_diff': MetadataFeatures.calculate_length_diff(response_a, response_b),
+            'ttr_diff': MetadataFeatures.calculate_ttr_diff(response_a, response_b)
+        }
+        
+        return core_features
     
     @staticmethod
     def extract_all_features(row: pd.Series) -> Dict[str, float]:
         """
-        提取單行數據的所有元數據特徵
+        提取所有元數據特徵 (目前與核心特徵相同)
         
         Args:
             row (pd.Series): 包含 prompt, response_a, response_b 的數據行
@@ -99,57 +167,8 @@ class MetadataFeatures:
         Returns:
             Dict[str, float]: 包含所有元數據特徵的字典
         """
-        prompt = str(row.get('prompt', ''))
-        response_a = str(row.get('response_a', ''))
-        response_b = str(row.get('response_b', ''))
-        
-        features = {
-            # 標點符號多樣性
-            'punc_v_a': MetadataFeatures.calculate_punctuation_variety(response_a),
-            'punc_v_b': MetadataFeatures.calculate_punctuation_variety(response_b),
-            'punc_v_prompt': MetadataFeatures.calculate_punctuation_variety(prompt),
-            
-            # Jaccard 相似度
-            'resp_jaccard': MetadataFeatures.calculate_jaccard_similarity(response_a, response_b),
-            'prompt_resp_a_jaccard': MetadataFeatures.calculate_jaccard_similarity(prompt, response_a),
-            'prompt_resp_b_jaccard': MetadataFeatures.calculate_jaccard_similarity(prompt, response_b),
-            
-            # 長度比例
-            'len_ratio': MetadataFeatures.calculate_length_ratio(response_a, response_b),
-            'prompt_resp_a_len_ratio': MetadataFeatures.calculate_length_ratio(prompt, response_a),
-            'prompt_resp_b_len_ratio': MetadataFeatures.calculate_length_ratio(prompt, response_b),
-            
-            # 額外的長度特徵
-            'prompt_length': len(prompt),
-            'response_a_length': len(response_a),
-            'response_b_length': len(response_b),
-            'total_length': len(prompt) + len(response_a) + len(response_b)
-        }
-        
-        return features
-    
-    @staticmethod
-    def extract_core_features(row: pd.Series) -> Dict[str, float]:
-        """
-        提取核心的三個元數據特徵（最重要的特徵）
-        
-        Args:
-            row (pd.Series): 包含 prompt, response_a, response_b 的數據行
-            
-        Returns:
-            Dict[str, float]: 包含核心三個特徵的字典
-        """
-        response_a = str(row.get('response_a', ''))
-        response_b = str(row.get('response_b', ''))
-        
-        core_features = {
-            'punc_v_a': MetadataFeatures.calculate_punctuation_variety(response_a),
-            'punc_v_b': MetadataFeatures.calculate_punctuation_variety(response_b),
-            'resp_jaccard': MetadataFeatures.calculate_jaccard_similarity(response_a, response_b),
-            'len_ratio': MetadataFeatures.calculate_length_ratio(response_a, response_b)
-        }
-        
-        return core_features
+        # 目前所有特徵就是核心特徵
+        return MetadataFeatures.extract_core_features(row)
     
     @staticmethod
     def add_metadata_features_to_dataframe(df: pd.DataFrame, feature_type: str = 'core') -> pd.DataFrame:
@@ -221,7 +240,6 @@ class MetadataFeatures:
                       f"範圍=[{stats[feature]['min']:.3f}, {stats[feature]['max']:.3f}]")
         
         return stats
-    
     @staticmethod
     def create_feature_vector(features_dict: Dict[str, float], feature_order: List[str] = None) -> List[float]:
         """
@@ -235,13 +253,13 @@ class MetadataFeatures:
             List[float]: 特徵向量
         """
         if feature_order is None:
-            # 默認的核心特徵順序
-            feature_order = ['punc_v_a', 'punc_v_b', 'resp_jaccard', 'len_ratio']
+            # 新的四個核心特徵順序
+            feature_order = ['jaccard_index', 'code_blocks_diff', 'length_diff', 'ttr_diff']
         
         feature_vector = []
         for feature_name in feature_order:
             value = features_dict.get(feature_name, 0.0)
-            # 處理可能的無窮大值
+            # 處理可能的無窮大值和 NaN
             if np.isinf(value):
                 value = 10.0  # 將無窮大值替換為一個合理的大數
             elif np.isnan(value):

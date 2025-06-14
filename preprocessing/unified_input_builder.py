@@ -195,18 +195,23 @@ class UnifiedInputBuilder:
         
         # 使用極短鍵名映射，每個鍵名最多2-3字符
         key_mapping = {
+            # Corrected mappings for the actual core features
+            'jaccard_index': 'ji',
+            'code_blocks_diff': 'cd',
+            'length_diff': 'ld',
+            'ttr_diff': 'td',
+
+            # Mappings for other potential features if 'all' type were to include more
             'punc_v_a': 'pa',
-            'punc_v_b': 'pb', 
-            'resp_jaccard': 'jc',
-            'len_ratio': 'lr',
+            'punc_v_b': 'pb',
             'punc_v_prompt': 'pp',
             'prompt_resp_a_jaccard': 'aj',
             'prompt_resp_b_jaccard': 'bj',
-            'prompt_resp_a_len_ratio': 'al',
-            'prompt_resp_b_len_ratio': 'bl',
+            'prompt_resp_a_len_ratio': 'alr',
+            'prompt_resp_b_len_ratio': 'blr',
             'prompt_length': 'pl',
-            'response_a_length': 'al',
-            'response_b_length': 'bl',
+            'response_a_length': 'ral',
+            'response_b_length': 'rbl',
             'total_length': 'tl'
         }
         
@@ -273,20 +278,16 @@ class UnifiedInputBuilder:
         """
         if feature_type == 'core':
             # 只提取最重要的核心特徵
-            core_features = ['punc_v_a', 'punc_v_b', 'resp_jaccard', 'len_ratio']
+            core_features = ['jaccard_index', 'code_blocks_diff', 'length_diff', 'ttr_diff'] # CORRECTED
             metadata = {}
             for feature in core_features:
                 if hasattr(row, feature) or feature in row:
                     metadata[feature] = row.get(feature, 0.0)
             return metadata
-        else:
+        else: # feature_type == 'all'
             # 提取所有可用的元數據特徵
-            all_possible_features = [
-                'punc_v_a', 'punc_v_b', 'punc_v_prompt',
-                'resp_jaccard', 'prompt_resp_a_jaccard', 'prompt_resp_b_jaccard',
-                'len_ratio', 'prompt_resp_a_len_ratio', 'prompt_resp_b_len_ratio',
-                'prompt_length', 'response_a_length', 'response_b_length', 'total_length'
-            ]
+            # CORRECTED to reflect what metadata_features.py actually produces for 'all' (which is currently core)
+            all_possible_features = ['jaccard_index', 'code_blocks_diff', 'length_diff', 'ttr_diff']
             metadata = {}
             for feature in all_possible_features:
                 if hasattr(row, feature) or feature in row:

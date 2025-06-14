@@ -180,15 +180,11 @@ class EnhancedLLMDataset(Dataset):
         self.metadata_type = metadata_type
         
         # 檢查可用的元數據特徵
+        # CORRECTED: Use the actual feature names produced by MetadataFeatures
         if metadata_type == 'core':
-            self.expected_features = ['punc_v_a', 'punc_v_b', 'resp_jaccard', 'len_ratio']
-        else:
-            self.expected_features = [
-                'punc_v_a', 'punc_v_b', 'punc_v_prompt',
-                'resp_jaccard', 'prompt_resp_a_jaccard', 'prompt_resp_b_jaccard',
-                'len_ratio', 'prompt_resp_a_len_ratio', 'prompt_resp_b_len_ratio',
-                'prompt_length', 'response_a_length', 'response_b_length', 'total_length'
-            ]
+            self.expected_features = ['jaccard_index', 'code_blocks_diff', 'length_diff', 'ttr_diff']
+        else: # Assuming 'all' currently means the same as 'core' based on metadata_features.py
+            self.expected_features = ['jaccard_index', 'code_blocks_diff', 'length_diff', 'ttr_diff']
         
         self.available_metadata_features = [
             f for f in self.expected_features if f in self.df.columns
@@ -342,19 +338,16 @@ class EnhancedTestDataset(Dataset):
         self.metadata_type = metadata_type
         
         # 檢查可用的元數據特徵
+        # CORRECTED: Use the actual feature names produced by MetadataFeatures
         if metadata_type == 'core':
-            self.expected_features = ['punc_v_a', 'punc_v_b', 'resp_jaccard', 'len_ratio']
-        else:
-            self.expected_features = [
-                'punc_v_a', 'punc_v_b', 'punc_v_prompt',
-                'resp_jaccard', 'prompt_resp_a_jaccard', 'prompt_resp_b_jaccard',
-                'len_ratio', 'prompt_resp_a_len_ratio', 'prompt_resp_b_len_ratio',
-                'prompt_length', 'response_a_length', 'response_b_length', 'total_length'
-            ]
+            self.expected_features = ['jaccard_index', 'code_blocks_diff', 'length_diff', 'ttr_diff']
+        else: # Assuming 'all' currently means the same as 'core'
+            self.expected_features = ['jaccard_index', 'code_blocks_diff', 'length_diff', 'ttr_diff']
         
         self.available_metadata_features = [
             f for f in self.expected_features if f in self.df.columns
         ]
+        # No print statement here in the original code for test dataset, maintaining that
 
     def __len__(self):
         return len(self.df)
