@@ -1,12 +1,12 @@
 # LLM Classification Fine-Tuning - UNIFIED & MODULAR PIPELINE
 # ===============================================================
-# 作者：[你的名字/團隊]
-# 版本：1.0
-# 描述：
-# 一個統一的、模組化的流水線，可在本地（有網路）和 Kaggle（完全離線）環境中無縫切換。
-# - 自動偵測環境（本地 vs Kaggle）。
-# - 中心化配置管理（Config 類）。
-# - 模組化流程（PipelineModules 類），方便協作與維護。
+# Version: 1.0
+# Description:
+# A unified and modular pipeline for seamless execution in both local (online) 
+# and Kaggle (fully offline) environments.
+# - Auto-detects the environment (Local vs. Kaggle).
+# - Centralized configuration management via a Config class.
+# - Modular workflow encapsulated in a PipelineModules class for maintainability.
 # ===============================================================
 
 import os
@@ -26,25 +26,25 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, log_loss
 from sklearn.utils.class_weight import compute_class_weight
 
-# 忽略不必要的警告
+# Suppress unnecessary warnings
 warnings.filterwarnings('ignore')
 
 # --------------------------------------------------------------------------
-# 1. 中心化配置 (Centralized Configuration)
+# 1. Centralized Configuration
 # --------------------------------------------------------------------------
 class Config:
     """
-    統一管理所有設定、路徑和超參數。
-    自動偵測環境並設定對應的路徑。
+    Manages all settings, paths, and hyperparameters in a centralized location.
+    Automatically detects the execution environment and sets paths accordingly.
     """
     def __init__(self):
-        # --- 基礎設定 ---
+        # --- Basic Settings ---
         self.MODEL_NAME = 'distilbert-base-uncased'
-        self.QUICK_TEST = False  # 設為 True 可用少量資料快速測試
+        self.QUICK_TEST = False  # Set to True for a quick run with a subset of data
         self.QUICK_TEST_SIZE = 2000
         self.RANDOM_STATE = 42
         
-        # --- 訓練超參數 ---
+        # --- Training Hyperparameters ---
         self.EPOCHS = 4
         self.LEARNING_RATE = 1e-5
         self.TRAIN_BATCH_SIZE = 8
@@ -58,83 +58,83 @@ class Config:
         self.LABEL_SMOOTHING = 0.1
         self.VALIDATION_SIZE = 0.15
 
-        # --- 環境偵測與路徑設定 ---
+        # --- Environment Detection and Path Configuration ---
         self.IS_KAGGLE = os.path.exists('/kaggle/input')
         
         if self.IS_KAGGLE:
-            print("🚀 Running in Kaggle environment (Offline Mode)")
-            # Kaggle 的資料輸入路徑
+            print("INFO: Running in Kaggle environment (Offline Mode)")
+            # Kaggle input paths
             self.DATA_DIR = "/kaggle/input/llm-classification-finetuning"
             self.TRAIN_PATH = os.path.join(self.DATA_DIR, "train.csv")
             self.TEST_PATH = os.path.join(self.DATA_DIR, "test.csv")
             
-            # Kaggle 的模型輸入路徑（假設模型已上傳為數據集）
+            # Kaggle model input path (assuming model is uploaded as a dataset)
             self.KAGGLE_MODEL_PATH = "/kaggle/input/distilbert_model/transformers/default/1/distilbert_model"
             
-            # Kaggle 的輸出路徑
+            # Kaggle output paths
             self.OUTPUT_DIR = "/kaggle/working/results"
             self.LOGGING_DIR = "/kaggle/working/logs"
             self.SUBMISSION_PATH = "/kaggle/working/submission.csv"
             self.VALIDATION_RESULTS_PATH = "/kaggle/working/validation_results.csv"
         else:
-            print("🏠 Running in Local environment (Online Mode)")
-            # 本地的資料路徑
+            print("INFO: Running in Local environment (Online Mode)")
+            # Local data paths
             self.DATA_DIR = "."
             self.TRAIN_PATH = os.path.join(self.DATA_DIR, "train.csv")
             self.TEST_PATH = os.path.join(self.DATA_DIR, "test.csv")
             
-            # 本地的模型路徑（會從 Hugging Face 下載）
-            self.KAGGLE_MODEL_PATH = None # 本地用不到
+            # Local model path (will download from Hugging Face)
+            self.KAGGLE_MODEL_PATH = None # Not used in local mode
             
-            # 本地的輸出路徑
+            # Local output paths
             self.OUTPUT_DIR = "./results"
             self.LOGGING_DIR = "./logs"
             self.SUBMISSION_PATH = os.path.join(self.OUTPUT_DIR, "submission.csv")
             self.VALIDATION_RESULTS_PATH = os.path.join(self.OUTPUT_DIR, "validation_results.csv")
             
-            # 確保本地輸出目錄存在
+            # Ensure local output directories exist
             os.makedirs(self.OUTPUT_DIR, exist_ok=True)
             os.makedirs(self.LOGGING_DIR, exist_ok=True)
             
-        # --- 設備設定 ---
+        # --- Device Configuration ---
         self.DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"💻 Using device: {self.DEVICE}")
+        print(f"INFO: Using device: {self.DEVICE}")
 
 # --------------------------------------------------------------------------
-# 2. 模組化流水線 (Modular Pipeline)
+# 2. Modular Pipeline
 # --------------------------------------------------------------------------
 class PipelineModules:
     """
-    封裝流水線中的核心功能模組。
-    所有方法都是靜態的，方便直接調用。
+    Encapsulates the core functional modules of the pipeline.
+    All methods are static for direct invocation.
     """
     
     @staticmethod
     def load_and_preprocess_data(config: Config):
-        """載入訓練和測試資料，並進行預處理。"""
-        print("\n[Module 1/5] 📊 Loading and preprocessing data...")
+        """Loads training and test data, then applies preprocessing steps."""
+        print("\n[Module 1/5] Loading and preprocessing data...")
         
-        # 載入訓練資料
+        # Load training data
         try:
             df = pd.read_csv(config.TRAIN_PATH)
-            print(f"  - Training data loaded: {df.shape}")
+            print(f"  - Training data loaded. Shape: {df.shape}")
         except FileNotFoundError:
-            print(f"❌ ERROR: Training file not found at {config.TRAIN_PATH}")
+            print(f"ERROR: Training file not found at {config.TRAIN_PATH}")
             raise
             
-        # 快速測試模式
+        # Quick test mode
         if config.QUICK_TEST and len(df) > config.QUICK_TEST_SIZE:
             df = df.sample(n=config.QUICK_TEST_SIZE, random_state=config.RANDOM_STATE).reset_index(drop=True)
-            print(f"  - Quick test mode enabled, sampled to {df.shape}")
+            print(f"  - Quick test mode enabled. Sampled to {df.shape}")
 
-        # 創建標籤
+        # Create labels
         def get_label(row):
             if row["winner_model_a"] == 1: return 0
             if row["winner_model_b"] == 1: return 1
             return 2
         df["label"] = df.apply(get_label, axis=1)
         
-        # 文本預處理
+        # Text preprocessing
         def create_optimized_input(row):
             prompt = str(row['prompt']).strip()
             response_a = str(row['response_a']).strip()
@@ -150,9 +150,9 @@ class PipelineModules:
             return text
 
         df["text"] = df.apply(create_optimized_input, axis=1)
-        print("  - Text inputs and labels processed.")
+        print("  - Text inputs and labels have been processed.")
         
-        # 載入測試資料
+        # Load test data
         df_test = None
         if os.path.exists(config.TEST_PATH):
             file_size_mb = os.path.getsize(config.TEST_PATH) / (1024**2)
@@ -161,7 +161,7 @@ class PipelineModules:
             else:
                 df_test = pd.read_csv(config.TEST_PATH)
                 df_test["text"] = df_test.apply(create_optimized_input, axis=1)
-                print(f"  - Test data loaded and processed: {df_test.shape}")
+                print(f"  - Test data loaded and processed. Shape: {df_test.shape}")
         else:
             print("  - WARNING: Test file not found. Inference will be skipped.")
             
@@ -169,46 +169,46 @@ class PipelineModules:
 
     @staticmethod
     def load_model_and_tokenizer(config: Config):
-        """根據環境載入模型和分詞器。"""
-        print("\n[Module 2/5] 🤖 Loading model and tokenizer...")
+        """Loads the model and tokenizer based on the environment."""
+        print("\n[Module 2/5] Loading model and tokenizer...")
         
         try:
             if config.IS_KAGGLE:
-                # Kaggle 離線模式
+                # Kaggle offline mode
                 model_path = config.KAGGLE_MODEL_PATH
                 if not os.path.exists(model_path):
                     raise FileNotFoundError(f"Offline model not found at {model_path}")
                 
-                print(f"  - Loading OFFLINE from: {model_path}")
+                print(f"  - Loading model and tokenizer from offline path: {model_path}")
                 tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
                 model = AutoModelForSequenceClassification.from_pretrained(
                     model_path, num_labels=3, local_files_only=True
                 )
             else:
-                # 本地線上模式
+                # Local online mode
                 model_path = config.MODEL_NAME
-                print(f"  - Loading ONLINE from Hugging Face: {model_path}")
+                print(f"  - Loading model and tokenizer from Hugging Face: {model_path}")
                 tokenizer = AutoTokenizer.from_pretrained(model_path)
                 model = AutoModelForSequenceClassification.from_pretrained(
                     model_path, num_labels=3
                 )
             
-            # 添加 padding token
+            # Add padding token if it doesn't exist
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
             
             model.to(config.DEVICE)
-            print(f"  - ✅ Model and tokenizer loaded successfully.")
+            print(f"  - Model and tokenizer loaded successfully.")
             return tokenizer, model, model_path
 
         except Exception as e:
-            print(f"❌ FATAL ERROR in model loading: {e}")
+            print(f"FATAL ERROR during model loading: {e}")
             raise
     
     @staticmethod
     def create_datasets(df, tokenizer, config: Config):
-        """創建訓練和驗證資料集。"""
-        print("\n[Module 3/5] 📚 Creating datasets...")
+        """Creates training and validation datasets."""
+        print("\n[Module 3/5] Creating datasets...")
         
         train_indices, val_indices, train_labels, val_labels = train_test_split(
             df.index, df["label"].tolist(), 
@@ -238,7 +238,7 @@ class PipelineModules:
         train_dataset = LLMDataset(train_texts, train_labels)
         val_dataset = LLMDataset(val_texts, val_labels)
         
-        # 計算類別權重
+        # Compute class weights
         class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
         class_weights_dict = {i: class_weights[i] for i in range(len(class_weights))}
         print(f"  - Class weights calculated: {class_weights_dict}")
@@ -247,8 +247,8 @@ class PipelineModules:
 
     @staticmethod
     def setup_trainer(model, train_dataset, val_dataset, class_weights_dict, config: Config):
-        """設定並返回 Trainer 物件。"""
-        print("\n[Module 4/5] 🛠️ Setting up trainer...")
+        """Configures and returns a Trainer instance."""
+        print("\n[Module 4/5] Setting up trainer...")
 
         training_args = TrainingArguments(
             output_dir=config.OUTPUT_DIR,
@@ -268,7 +268,7 @@ class PipelineModules:
             metric_for_best_model="eval_log_loss",
             greater_is_better=False,
             save_total_limit=config.SAVE_TOTAL_LIMIT,
-            fp16=torch.cuda.is_available(), # 如果有CUDA，則啟用FP16
+            fp16=torch.cuda.is_available(), # Enable FP16 if CUDA is available
             dataloader_pin_memory=False,
             report_to="none",
             seed=config.RANDOM_STATE,
@@ -285,7 +285,7 @@ class PipelineModules:
             
             return {"accuracy": accuracy, "log_loss": logloss}
         
-        # 重新初始化分類層權重
+        # Reinitialize classifier layer weights
         if hasattr(model, 'classifier'):
             print("  - Reinitializing classifier weights...")
             model.classifier.apply(lambda module: module.reset_parameters() if hasattr(module, 'reset_parameters') else None)
@@ -316,21 +316,20 @@ class PipelineModules:
 
     @staticmethod
     def run_inference_and_save(trainer, df_test, tokenizer, config: Config):
-        """執行測試集推理並儲存提交檔案。"""
-        print("\n[Module 5/5] 🔮 Running inference and creating submission...")
+        """Runs inference on the test set and saves the submission file."""
+        print("\n[Module 5/5] Running inference and creating submission...")
         
         if df_test is None:
             if not os.path.exists(config.TEST_PATH):
                 print("  - Test file not found, skipping inference.")
-                # 在 Kaggle 環境中，如果沒有 test.csv，通常意味著這是個 Code Competition 的第二階段
-                # 創建一個假的 submission.csv 避免提交錯誤
+                # For Kaggle code competitions, an empty test set in the first stage might require a dummy submission.
                 if config.IS_KAGGLE:
                      pd.DataFrame({'id': [], 'winner_model_a': [], 'winner_model_b': [], 'winner_tie': []}).to_csv(config.SUBMISSION_PATH, index=False)
                      print("  - Empty submission.csv created for Kaggle environment.")
                 return
 
         def process_test_batch(test_df_chunk, tokenizer):
-            """處理單一批次的測試資料"""
+            """Processes a single batch of test data."""
             class TestDataset(Dataset):
                 def __init__(self, texts):
                     self.encodings = tokenizer(texts, truncation=True, padding="max_length", max_length=512, return_tensors="pt")
@@ -343,7 +342,7 @@ class PipelineModules:
             return probs
 
         try:
-            # 根據檔案大小決定是否分批處理
+            # Decide whether to process in batches based on file size
             file_size_mb = os.path.getsize(config.TEST_PATH) / (1024**2) if os.path.exists(config.TEST_PATH) else 0
             
             if file_size_mb > 100:
@@ -353,7 +352,7 @@ class PipelineModules:
                 
                 for i, chunk in enumerate(chunk_iter):
                     print(f"    - Processing batch {i+1}...")
-                    chunk["text"] = chunk.apply(PipelineModules.load_and_preprocess_data.create_optimized_input, axis=1)
+                    chunk["text"] = chunk.apply(lambda row: PipelineModules.load_and_preprocess_data.create_optimized_input(row), axis=1)
                     probs = process_test_batch(chunk, tokenizer)
                     all_ids.extend(chunk["id"].tolist())
                     all_probs.append(probs)
@@ -371,16 +370,16 @@ class PipelineModules:
             submission["winner_model_b"] = probabilities[:, 1]
             submission["winner_tie"] = probabilities[:, 2]
 
-            # 確保概率總和為 1
+            # Normalize probabilities to ensure they sum to 1
             row_sums = submission[["winner_model_a", "winner_model_b", "winner_tie"]].sum(axis=1)
             submission["winner_model_a"] /= row_sums
             submission["winner_model_b"] /= row_sums
             submission["winner_tie"] /= row_sums
 
             submission.to_csv(config.SUBMISSION_PATH, index=False)
-            print(f"  - ✅ Submission file saved to: {config.SUBMISSION_PATH}")
+            print(f"  - Submission file saved to: {config.SUBMISSION_PATH}")
             
-            # 顯示預測分佈
+            # Display prediction distribution
             final_preds = np.argmax(probabilities, axis=-1)
             print("\n  - Test prediction distribution:")
             print(f"    Model A wins: {np.sum(final_preds == 0)}")
@@ -388,54 +387,54 @@ class PipelineModules:
             print(f"    Ties:         {np.sum(final_preds == 2)}")
 
         except Exception as e:
-            print(f"❌ ERROR during test inference: {e}")
+            print(f"ERROR during test inference: {e}")
             print("  - Creating a dummy submission file to prevent failure.")
             dummy_sub = pd.DataFrame({"id": [0], "winner_model_a": [0.33], "winner_model_b": [0.33], "winner_tie": [0.34]})
             dummy_sub.to_csv(config.SUBMISSION_PATH, index=False)
 
 # --------------------------------------------------------------------------
-# 3. 主執行流程 (Main Execution Flow)
+# 3. Main Execution Flow
 # --------------------------------------------------------------------------
 def main():
     """
-    執行完整的機器學習流水線。
+    Executes the complete machine learning pipeline.
     """
-    # === 步驟 1: 初始化配置 ===
+    # === Step 1: Initialize Configuration ===
     config = Config()
 
-    # === 步驟 2: 載入並預處理資料 ===
+    # === Step 2: Load and Preprocess Data ===
     df, df_test = PipelineModules.load_and_preprocess_data(config)
 
-    # === 步驟 3: 載入模型和分詞器 ===
+    # === Step 3: Load Model and Tokenizer ===
     tokenizer, model, model_path_info = PipelineModules.load_model_and_tokenizer(config)
 
-    # === 步驟 4: 創建資料集 ===
+    # === Step 4: Create Datasets ===
     train_dataset, val_dataset, val_labels, val_indices, class_weights = PipelineModules.create_datasets(
         df, tokenizer, config
     )
 
-    # === 步驟 5: 設定並執行訓練 ===
+    # === Step 5: Setup and Run Training ===
     trainer = PipelineModules.setup_trainer(model, train_dataset, val_dataset, class_weights, config)
     
-    print("\n🚀 Starting training...")
+    print("\nStarting model training...")
     trainer.train()
-    print("✅ Training complete.")
+    print("Training complete.")
 
-    # === 步驟 6: 最終驗證與評估 ===
-    print("\n📈 Final validation...")
+    # === Step 6: Final Validation and Evaluation ===
+    print("\nRunning final validation...")
     val_preds = trainer.predict(val_dataset)
     val_probs = torch.nn.functional.softmax(torch.from_numpy(val_preds.predictions), dim=-1).numpy()
     val_final_loss = log_loss(val_labels, val_probs, eps=1e-7)
     val_final_acc = accuracy_score(val_labels, np.argmax(val_probs, axis=1))
 
     print(f"\n{'='*60}")
-    print(f"🏆 FINAL VALIDATION RESULTS")
+    print(f"FINAL VALIDATION RESULTS")
     print(f"  - Model Used: {model_path_info}")
     print(f"  - Log Loss:   {val_final_loss:.6f}")
     print(f"  - Accuracy:   {val_final_acc:.4f}")
     print(f"{'='*60}\n")
     
-    # 儲存驗證結果以供分析
+    # Save validation results for analysis
     val_results = pd.DataFrame({
         "id": df.loc[val_indices, "id"],
         "gt_label": val_labels,
@@ -446,10 +445,10 @@ def main():
     val_results.to_csv(config.VALIDATION_RESULTS_PATH, index=False)
     print(f"  - Validation results saved to: {config.VALIDATION_RESULTS_PATH}")
 
-    # === 步驟 7: 測試集推理與提交 ===
+    # === Step 7: Test Set Inference and Submission ===
     PipelineModules.run_inference_and_save(trainer, df_test, tokenizer, config)
 
-    print("\n🎉 Pipeline finished successfully!")
+    print("\nPipeline finished successfully!")
 
 if __name__ == "__main__":
     main()
