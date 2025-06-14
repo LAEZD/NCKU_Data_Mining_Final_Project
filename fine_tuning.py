@@ -1,13 +1,13 @@
-# LLM Classification Fine-Tuning - UNIFIED & MODULAR PIPELINE
-# ===============================================================
-# Version: 1.0
+# LLM Classification Fine-Tuning - ENHANCED UNIFIED PIPELINE
+# ============================================================
+# Version: 2.0 (Enhanced)
 # Description:
-# A unified and modular pipeline for seamless execution in both local (online) 
-# and Kaggle (fully offline) environments.
-# - Auto-detects the environment (Local vs. Kaggle).
-# - Centralized configuration management via a Config class.
-# - Modular workflow encapsulated in a PipelineModules class for maintainability.
-# ===============================================================
+# An enhanced unified pipeline with advanced data preprocessing capabilities:
+# - Data augmentation through response swapping to reduce position bias
+# - Dynamic budget allocation for optimal token usage
+# - Metadata feature extraction for improved model performance
+# - Modular design with clean separation of concerns
+# ============================================================
 
 import os
 import warnings
@@ -22,9 +22,10 @@ from transformers import (
     TrainingArguments,
     EarlyStoppingCallback
 )
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, log_loss
-from sklearn.utils.class_weight import compute_class_weight
+
+# Import enhanced preprocessing modules
+from preprocessing.enhanced_preprocessing import EnhancedPipelineModules, EnhancedTestDataset
 
 # Suppress unnecessary warnings
 warnings.filterwarnings('ignore')
@@ -37,12 +38,15 @@ class Config:
     Manages all settings, paths, and hyperparameters in a centralized location.
     Automatically detects the execution environment and sets paths accordingly.
     """
-    def __init__(self):
-        # --- Basic Settings ---
+    def __init__(self):        # --- Basic Settings ---
         self.MODEL_NAME = 'distilbert-base-uncased'
-        self.QUICK_TEST = True  # Set to True for a quick run with a subset of data
+        self.QUICK_TEST = False # Set to True for a quick run with a subset of data
         self.QUICK_TEST_SIZE = 2000
         self.RANDOM_STATE = 42
+          # --- Enhanced Features Settings ---
+        self.APPLY_AUGMENTATION = False   # Enable data augmentation (正確的黃金標準流程)
+        self.EXTRACT_METADATA = True   # Enable metadata feature extraction
+        self.METADATA_TYPE = 'core'    # 'core' or 'all'
         
         # --- Training Hyperparameters ---
         self.EPOCHS = 4
@@ -101,70 +105,26 @@ class Config:
         print(f"INFO: Using device: {self.DEVICE}")
 
 # --------------------------------------------------------------------------
-# 2. Modular Pipeline
+# 2. Streamlined Pipeline (Using Enhanced Modules)
 # --------------------------------------------------------------------------
 class PipelineModules:
     """
-    Encapsulates the core functional modules of the pipeline.
-    All methods are static for direct invocation.
+    Streamlined pipeline modules that delegate preprocessing to enhanced modules
+    while maintaining the core training and inference logic.
     """
     
     @staticmethod
     def load_and_preprocess_data(config: Config):
-        """Loads training and test data, then applies preprocessing steps."""
-        print("\n[Module 1/5] Loading and preprocessing data...")
+        """Loads and preprocesses data using enhanced modules."""
+        print("\n[Module 1/5] Loading and preprocessing data with enhancements...")
         
-        # Load training data
-        try:
-            df = pd.read_csv(config.TRAIN_PATH)
-            print(f"  - Training data loaded. Shape: {df.shape}")
-        except FileNotFoundError:
-            print(f"ERROR: Training file not found at {config.TRAIN_PATH}")
-            raise
-            
-        # Quick test mode
-        if config.QUICK_TEST and len(df) > config.QUICK_TEST_SIZE:
-            df = df.sample(n=config.QUICK_TEST_SIZE, random_state=config.RANDOM_STATE).reset_index(drop=True)
-            print(f"  - Quick test mode enabled. Sampled to {df.shape}")
-
-        # Create labels
-        def get_label(row):
-            if row["winner_model_a"] == 1: return 0
-            if row["winner_model_b"] == 1: return 1
-            return 2
-        df["label"] = df.apply(get_label, axis=1)
+        # Delegate to enhanced preprocessing
+        df, df_test = EnhancedPipelineModules.load_and_preprocess_data(config)
         
-        # Text preprocessing
-        def create_optimized_input(row):
-            prompt = str(row['prompt']).strip()
-            response_a = str(row['response_a']).strip()
-            response_b = str(row['response_b']).strip()
-            
-            len_a, len_b = len(response_a), len(response_b)
-            text = f"Compare responses to: {prompt} [SEP] Option A ({len_a} chars): {response_a} [SEP] Option B ({len_b} chars): {response_b}"
-            
-            if len(text) > 480:
-                max_prompt = min(100, len(prompt))
-                max_resp = min(140, len(response_a), len(response_b))
-                text = f"Compare: {prompt[:max_prompt]} [SEP] A: {response_a[:max_resp]} [SEP] B: {response_b[:max_resp]}"
-            return text
-
-        df["text"] = df.apply(create_optimized_input, axis=1)
-        print("  - Text inputs and labels have been processed.")
+        print(f"  - Training data shape: {df.shape}")
+        if df_test is not None:
+            print(f"  - Test data shape: {df_test.shape}")
         
-        # Load test data
-        df_test = None
-        if os.path.exists(config.TEST_PATH):
-            file_size_mb = os.path.getsize(config.TEST_PATH) / (1024**2)
-            if file_size_mb > 100:
-                print(f"  - Large test file ({file_size_mb:.1f} MB) detected. Will process in batches.")
-            else:
-                df_test = pd.read_csv(config.TEST_PATH)
-                df_test["text"] = df_test.apply(create_optimized_input, axis=1)
-                print(f"  - Test data loaded and processed. Shape: {df_test.shape}")
-        else:
-            print("  - WARNING: Test file not found. Inference will be skipped.")
-            
         return df, df_test
 
     @staticmethod
@@ -207,43 +167,11 @@ class PipelineModules:
     
     @staticmethod
     def create_datasets(df, tokenizer, config: Config):
-        """Creates training and validation datasets."""
-        print("\n[Module 3/5] Creating datasets...")
+        """Creates enhanced training and validation datasets."""
+        print("\n[Module 3/5] Creating enhanced datasets...")
         
-        train_indices, val_indices, train_labels, val_labels = train_test_split(
-            df.index, df["label"].tolist(), 
-            test_size=config.VALIDATION_SIZE, 
-            random_state=config.RANDOM_STATE, 
-            stratify=df["label"]
-        )
-        
-        train_texts = df.loc[train_indices, "text"].tolist()
-        val_texts = df.loc[val_indices, "text"].tolist()
-        
-        print(f"  - Training samples: {len(train_texts)}")
-        print(f"  - Validation samples: {len(val_texts)}")
-
-        class LLMDataset(Dataset):
-            def __init__(self, texts, labels=None):
-                self.encodings = tokenizer(texts, truncation=True, padding="max_length", max_length=512, return_tensors="pt")
-                self.labels = labels
-            def __len__(self):
-                return len(self.encodings["input_ids"])
-            def __getitem__(self, idx):
-                item = {key: val[idx] for key, val in self.encodings.items()}
-                if self.labels is not None:
-                    item["labels"] = torch.tensor(self.labels[idx], dtype=torch.long)
-                return item
-
-        train_dataset = LLMDataset(train_texts, train_labels)
-        val_dataset = LLMDataset(val_texts, val_labels)
-        
-        # Compute class weights
-        class_weights = compute_class_weight('balanced', classes=np.unique(train_labels), y=train_labels)
-        class_weights_dict = {i: class_weights[i] for i in range(len(class_weights))}
-        print(f"  - Class weights calculated: {class_weights_dict}")
-
-        return train_dataset, val_dataset, val_labels, val_indices, class_weights_dict
+        # Delegate to enhanced preprocessing
+        return EnhancedPipelineModules.create_enhanced_datasets(df, tokenizer, config)
 
     @staticmethod
     def setup_trainer(model, train_dataset, val_dataset, class_weights_dict, config: Config):
@@ -310,12 +238,11 @@ class PipelineModules:
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
             compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]
-        )
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)])
         
         print("  - Trainer setup complete.")
         return trainer
-
+    
     @staticmethod
     def run_inference_and_save(trainer, df_test, tokenizer, config: Config):
         """Runs inference on the test set and saves the submission file."""
@@ -323,22 +250,28 @@ class PipelineModules:
         
         if df_test is None:
             if not os.path.exists(config.TEST_PATH):
-                print("  - Test file not found, skipping inference.")
-                # For Kaggle code competitions, an empty test set in the first stage might require a dummy submission.
+                print("  - Test file not found, skipping inference.")                # For Kaggle code competitions, an empty test set in the first stage might require a dummy submission.
                 if config.IS_KAGGLE:
                      pd.DataFrame({'id': [], 'winner_model_a': [], 'winner_model_b': [], 'winner_tie': []}).to_csv(config.SUBMISSION_PATH, index=False)
-                     print("  - Empty submission.csv created for Kaggle environment.")
-                return
+                     print("  - Empty submission.csv created for Kaggle environment.")                
+                     return
 
         def process_test_batch(test_df_chunk, tokenizer):
-            """Processes a single batch of test data."""
-            class TestDataset(Dataset):
-                def __init__(self, texts):
-                    self.encodings = tokenizer(texts, truncation=True, padding="max_length", max_length=512, return_tensors="pt")
-                def __len__(self): return len(self.encodings["input_ids"])
-                def __getitem__(self, idx): return {key: val[idx] for key, val in self.encodings.items()}
+            """Processes a single batch of test data using enhanced preprocessing."""
+            # 為批次數據提取元數據特徵
+            if config.EXTRACT_METADATA:
+                from preprocessing.metadata_features import MetadataFeatures
+                test_df_chunk = MetadataFeatures.add_metadata_features_to_dataframe(
+                    test_df_chunk, feature_type=config.METADATA_TYPE
+                )
             
-            test_dataset = TestDataset(test_df_chunk["text"].tolist())
+            # 使用 EnhancedTestDataset 確保測試階段也使用統一輸入構建策略
+            test_dataset = EnhancedTestDataset(
+                dataframe=test_df_chunk,
+                tokenizer=tokenizer,
+                include_metadata=config.EXTRACT_METADATA,
+                metadata_type=config.METADATA_TYPE
+            )
             preds = trainer.predict(test_dataset)
             probs = torch.nn.functional.softmax(torch.from_numpy(preds.predictions), dim=-1).numpy()
             return probs
@@ -354,7 +287,7 @@ class PipelineModules:
                 
                 for i, chunk in enumerate(chunk_iter):
                     print(f"    - Processing batch {i+1}...")
-                    chunk["text"] = chunk.apply(lambda row: PipelineModules.load_and_preprocess_data.create_optimized_input(row), axis=1)
+                    # 直接使用原始數據框，不需要創建 text 列
                     probs = process_test_batch(chunk, tokenizer)
                     all_ids.extend(chunk["id"].tolist())
                     all_probs.append(probs)
