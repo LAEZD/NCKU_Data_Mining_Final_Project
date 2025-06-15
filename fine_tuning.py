@@ -44,7 +44,7 @@ class Config:
         self.QUICK_TEST_SIZE = 2000
         self.RANDOM_STATE = 42
           # --- Enhanced Features Settings ---
-        self.APPLY_AUGMENTATION = False   # Enable data augmentation (正確的黃金標準流程)
+        self.APPLY_AUGMENTATION = False   # Enable data augmentation 
         self.EXTRACT_METADATA = True   # Enable metadata feature extraction
         self.METADATA_TYPE = 'core'    # 'core' or 'all'
         

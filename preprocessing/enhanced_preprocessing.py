@@ -68,8 +68,10 @@ class EnhancedPreprocessing:
             df = MetadataFeatures.add_metadata_features_to_dataframe(df, feature_type=metadata_type)
             
             # 分析特徵分布
-            core_features = ['punc_v_a', 'punc_v_b', 'resp_jaccard', 'len_ratio']
-            existing_features = [f for f in core_features if f in df.columns]
+            # Ensure this list matches the actual features produced by MetadataFeatures
+            # Based on the update, 'code_blocks_diff' is now 'content_blocks_diff'
+            core_features_to_analyze = ['jaccard_index', 'content_blocks_diff', 'length_diff', 'ttr_diff']
+            existing_features = [f for f in core_features_to_analyze if f in df.columns]
             if existing_features:
                 MetadataFeatures.analyze_feature_distributions(df, existing_features)
         
@@ -164,6 +166,7 @@ class EnhancedLLMDataset(Dataset):
         tokenizer,
         include_metadata: bool = True,
         metadata_type: str = 'core'
+        # REMOVED: FastLexRank params are no longer passed here
     ):
         """
         初始化增強型數據集
@@ -182,9 +185,9 @@ class EnhancedLLMDataset(Dataset):
         # 檢查可用的元數據特徵
         # CORRECTED: Use the actual feature names produced by MetadataFeatures
         if metadata_type == 'core':
-            self.expected_features = ['jaccard_index', 'code_blocks_diff', 'length_diff', 'ttr_diff']
+            self.expected_features = ['jaccard_index', 'content_blocks_diff', 'length_diff', 'ttr_diff'] # Updated
         else: # Assuming 'all' currently means the same as 'core' based on metadata_features.py
-            self.expected_features = ['jaccard_index', 'code_blocks_diff', 'length_diff', 'ttr_diff']
+            self.expected_features = ['jaccard_index', 'content_blocks_diff', 'length_diff', 'ttr_diff'] # Updated
         
         self.available_metadata_features = [
             f for f in self.expected_features if f in self.df.columns
@@ -207,12 +210,14 @@ class EnhancedLLMDataset(Dataset):
             metadata_dict = UnifiedInputBuilder.extract_metadata_from_row(row, self.metadata_type)
         
         # 使用統一輸入構建器創建輸入
+        # MODIFIED: Removed FastLexRank specific args from call
         encoded = UnifiedInputBuilder.create_unified_input(
             tokenizer=self.tokenizer,
             prompt=str(row['prompt']),
             response_a=str(row['response_a']),
             response_b=str(row['response_b']),
             metadata_dict=metadata_dict
+            # Assuming max_len and include_prompt are handled by other logic or defaults
         )
         
         # 添加標籤（如果存在）
@@ -232,6 +237,7 @@ class EnhancedPipelineModules:
         使用統一輸入構建策略創建輸入
         這個方法現在使用 UnifiedInputBuilder 實現
         """
+        # MODIFIED: Removed FastLexRank specific args from call
         return UnifiedInputBuilder.create_unified_input(
             tokenizer=tokenizer,
             prompt=prompt,
@@ -253,7 +259,7 @@ class EnhancedPipelineModules:
             metadata_type='core'
         )
     @staticmethod
-    def create_enhanced_datasets(df, tokenizer, config):
+    def create_enhanced_datasets(df, tokenizer, config): # config is still passed for other settings
         """
         創建增強型數據集 - 修正版：先分割，再對訓練集進行數據增強
         """
@@ -299,18 +305,20 @@ class EnhancedPipelineModules:
         print(f"    * Validation set size: {len(val_df)}")
         print(f"    * No overlap between train and val: ✓ Guaranteed by proper splitting order")
         
-        # 創建增強型數據集        # 創建增強型數據集
+        # 創建增強型數據集
         train_dataset = EnhancedLLMDataset(
             train_df_final, 
             tokenizer, 
-            include_metadata=config.EXTRACT_METADATA,
-            metadata_type=config.METADATA_TYPE
+            include_metadata=config.EXTRACT_METADATA, # This still comes from config
+            metadata_type=config.METADATA_TYPE      # This still comes from config
+            # FastLexRank params are no longer passed
         )
         val_dataset = EnhancedLLMDataset(
             val_df, 
             tokenizer, 
-            include_metadata=config.EXTRACT_METADATA,
-            metadata_type=config.METADATA_TYPE
+            include_metadata=config.EXTRACT_METADATA,   # This still comes from config
+            metadata_type=config.METADATA_TYPE        # This still comes from config
+            # FastLexRank params are no longer passed
         )
         
         # 計算類別權重（基於最終的訓練集）
@@ -331,6 +339,7 @@ class EnhancedTestDataset(Dataset):
         tokenizer, 
         include_metadata: bool = True,
         metadata_type: str = 'core'
+        # REMOVED: FastLexRank params are no longer passed here
     ):
         self.df = dataframe
         self.tokenizer = tokenizer
@@ -340,9 +349,9 @@ class EnhancedTestDataset(Dataset):
         # 檢查可用的元數據特徵
         # CORRECTED: Use the actual feature names produced by MetadataFeatures
         if metadata_type == 'core':
-            self.expected_features = ['jaccard_index', 'code_blocks_diff', 'length_diff', 'ttr_diff']
+            self.expected_features = ['jaccard_index', 'content_blocks_diff', 'length_diff', 'ttr_diff'] # Updated
         else: # Assuming 'all' currently means the same as 'core'
-            self.expected_features = ['jaccard_index', 'code_blocks_diff', 'length_diff', 'ttr_diff']
+            self.expected_features = ['jaccard_index', 'content_blocks_diff', 'length_diff', 'ttr_diff'] # Updated
         
         self.available_metadata_features = [
             f for f in self.expected_features if f in self.df.columns
@@ -361,12 +370,14 @@ class EnhancedTestDataset(Dataset):
             metadata_dict = UnifiedInputBuilder.extract_metadata_from_row(row, self.metadata_type)
         
         # 使用統一輸入構建器
+        # MODIFIED: Removed FastLexRank specific args from call
         encoded = UnifiedInputBuilder.create_unified_input(
             tokenizer=self.tokenizer,
             prompt=str(row['prompt']),
             response_a=str(row['response_a']),
             response_b=str(row['response_b']),
             metadata_dict=metadata_dict
+            # Assuming max_len and include_prompt are handled by other logic or defaults
         )
         
         return encoded
