@@ -31,9 +31,10 @@ class MetadataFeatures:
         # 移除程式碼區塊
         text = re.sub(r'```.*?```', '[CODE_BLOCK]', text, flags=re.DOTALL)
         # 移除數學公式區塊
-        text = re.sub(r'\\$\\$.*?\\$\\$', '[MATH_BLOCK]', text, flags=re.DOTALL)
+        text = re.sub(r'\$\$.*?\$\$', '[MATH_BLOCK]', text, flags=re.DOTALL)
         # 移除 Markdown 表格
-        text = re.sub(r'((?:\\|.*?\\|[\\r\\n\\s]*){2,})', '[TABLE_BLOCK]', text)
+        # text = re.sub(r"^\s*\|.*\|.*[\r\n]+^\s*\|[-|: \t]+\|.*[\r\n]+(?:^\s*\|.*\|.*\s*[\r\n]?)+", '[TABLE_BLOCK]', text, flags=re.MULTILINE)
+        text = re.sub(r'((?:\|.*\|[\r\n\s]*){2,})', '[TABLE_BLOCK]', text)
         return text
 
     @staticmethod

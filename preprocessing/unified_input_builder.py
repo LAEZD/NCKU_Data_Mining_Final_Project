@@ -13,7 +13,11 @@ from sumy.parsers.plaintext import PlaintextParser
 from sumy.nlp.tokenizers import Tokenizer as SumyTokenizer
 from sumy.summarizers.lex_rank import LexRankSummarizer
 
-# Ensure NLTK\'s punkt tokenizer is available
+# NEW: Import MetadataFeatures for content cleaning
+from .metadata_features import MetadataFeatures
+
+
+# Ensure NLTK\\\'s punkt tokenizer is available
 try:
     nltk.data.find('tokenizers/punkt')
 except nltk.downloader.DownloadError:
@@ -32,15 +36,16 @@ except Exception as e: # Catch other potential errors during NLTK setup
 # These are used as default values for the corresponding parameters in create_unified_input.
 CREATE_UNIFIED_INPUT_USE_FASTLEXRANK_DEFAULT = True
 CREATE_UNIFIED_INPUT_FASTLEXRANK_LOWER_BOUND_DEFAULT = 1
+INCLUDE_PROMPT_DEFAULT = True
+# NEW: Defaults for response FastLexRank
+CREATE_UNIFIED_INPUT_USE_FASTLEXRANK_FOR_RESPONSE_DEFAULT = False
+CREATE_UNIFIED_INPUT_FASTLEXRANK_RESPONSE_LOWER_BOUND_DEFAULT = 10
+# RENAMED and UPDATED: Default for applying content cleaning to prompt/responses before tokenization and LexRank
+APPLY_CONTENT_CLEANING_DEFAULT = True
+# NEW: Switch for fixed input format
+USE_FIXED_FORMAT_DEFAULT = True # You can change this to True if you want fixed format by default
 
-# General preprocessing flags (primarily for logic outside UnifiedInputBuilder,
-# e.g., in enhanced_preprocessing.py, often controlled by fine_tuning.py\'s Config)
-# Defined here for user convenience to see all related flags together.
-# Consider importing these into fine_tuning.py\'s Config if you want this file to be the source of truth.
-APPLY_AUGMENTATION_CONFIG_DEFAULT = False # Corresponds to Config.APPLY_AUGMENTATION in fine_tuning.py
-EXTRACT_METADATA_CONFIG_DEFAULT = True    # Corresponds to Config.EXTRACT_METADATA in fine_tuning.py
-METADATA_TYPE_CONFIG_DEFAULT = 'core'     # Corresponds to Config.METADATA_TYPE in fine_tuning.py
-# INCLUDE_PROMPT is a direct parameter to create_unified_input, typically from Config.
+
 
 def get_lexrank_summary_token_ids(
     original_prompt_text: str,
@@ -114,173 +119,280 @@ class UnifiedInputBuilder:
         response_b: str,
         metadata_dict: Dict[str, Union[float, int]] = None,
         max_len: int = 512,
-        include_prompt: bool = True,
-        # NEW parameters for FastLexRank, using module-level defaults
+        include_prompt: bool =INCLUDE_PROMPT_DEFAULT,
         use_fastlexrank_for_question: bool = CREATE_UNIFIED_INPUT_USE_FASTLEXRANK_DEFAULT,
-        fastlexrank_question_token_lower_bound: int = CREATE_UNIFIED_INPUT_FASTLEXRANK_LOWER_BOUND_DEFAULT
+        fastlexrank_question_token_lower_bound: int = CREATE_UNIFIED_INPUT_FASTLEXRANK_LOWER_BOUND_DEFAULT,
+        use_fastlexrank_for_response: bool = CREATE_UNIFIED_INPUT_USE_FASTLEXRANK_FOR_RESPONSE_DEFAULT,
+        fastlexrank_response_token_lower_bound: int = CREATE_UNIFIED_INPUT_FASTLEXRANK_RESPONSE_LOWER_BOUND_DEFAULT,
+        # RENAMED parameter to control content cleaning for both prompt and responses
+        apply_content_cleaning: bool = APPLY_CONTENT_CLEANING_DEFAULT,
+        # NEW: Parameter for fixed input format
+        use_fixed_format: bool = USE_FIXED_FORMAT_DEFAULT
     ) -> Dict[str, torch.Tensor]:
         """
         統一的輸入構建函數 - 將元數據、prompt 和 responses 整合為模型輸入
 
-        優先級策略:
+        優先級策略 (更新後):
         P0 (最高): 元數據字串 - 必須完整保留
-        P1 (次高): Prompt - 重要上下文，設定預算上限 (如果 include_prompt 為 True)
-                     (可能會被 FastLexrank 壓縮)
-        P2 (普通): Responses - 使用剩餘空間，平均分配
+        P1 (次高): Responses - 如果超長，會嘗試 FastLexRank (如果啟用)，然後截斷。目標是公平分配空間並填滿預算。
+        P2 (最低): Prompt - 如果超長，會嘗試 FastLexRank (如果啟用)，然後截断。
         """
 
         # === Step 1: 將元數據轉換為緊湊的字串格式 ===
         metadata_string = UnifiedInputBuilder._format_metadata_string(metadata_dict)
 
         # === Step 2: 智能特殊 token 空間計算 ===
-        special_tokens_needed = 3  # [CLS] + 2個 [SEP] (for responses)
-        if metadata_string:
-            special_tokens_needed += 1
-        # FIXED: Removed invalid escape in comment
-        if include_prompt: # This will be for the prompt's SEP
-            special_tokens_needed += 1
+        if use_fixed_format:
+            special_tokens_needed = 4  # [CLS], [SEP] for meta, [SEP] for Q, [SEP] for A/B
+        else:
+            special_tokens_needed = 3  # [CLS] + 2個 [SEP] (for responses)
+            if metadata_string:
+                special_tokens_needed += 1
+            # FIXED: Removed invalid escape in comment
+            if include_prompt: # This will be for the prompt's SEP
+                special_tokens_needed += 1
 
         available_space = max_len - special_tokens_needed
 
         # === Step 3: 元數據字串處理（最高優先級 P0） ===
         metadata_text = f"meta:{metadata_string}" if metadata_string else ""
-        # FIXED: Changed [\'input_ids\'] to ['input_ids']
         metadata_ids = tokenizer(metadata_text, add_special_tokens=False)['input_ids'] if metadata_text else []
 
         metadata_used_space = len(metadata_ids)
+        # Consider a dynamic cap based on max_len, e.g., 10% of max_len but not more than 50.
         max_metadata_budget = min(available_space // 4, 50)
 
+
         if metadata_used_space > max_metadata_budget:
-            print(f"警告: 元數據過長 ({metadata_used_space} tokens)，智能截斷到 {max_metadata_budget} tokens")
+            # print(f\"警告: 元數據過長 ({metadata_used_space} tokens)，智能截斷到 {max_metadata_budget} tokens\")
             metadata_ids = metadata_ids[:max_metadata_budget]
             metadata_used_space = len(metadata_ids)
 
         remaining_space_after_metadata = available_space - metadata_used_space
 
-        if remaining_space_after_metadata <= 10:
-            print(f"錯誤: 元數據處理後可用空間不足 ({remaining_space_after_metadata} tokens)")
-            emergency_budget = min(metadata_used_space, 20)
-            metadata_ids = metadata_ids[:emergency_budget]
-            metadata_used_space = len(metadata_ids)
+        if remaining_space_after_metadata <= 10: # Ensure some space for actual content
+            # print(f\"警告: 元數據處理後可用空間不足 ({remaining_space_after_metadata} tokens). 嘗試減少元數據.\")
+            # Further reduce metadata if it leaves too little space.
+            emergency_metadata_budget = min(metadata_used_space, max(0, available_space - 10)) # Ensure at least 10 for content
+            if metadata_used_space > emergency_metadata_budget:
+                 metadata_ids = metadata_ids[:emergency_metadata_budget]
+                 metadata_used_space = len(metadata_ids)
             remaining_space_after_metadata = available_space - metadata_used_space
+            if remaining_space_after_metadata <=0:
+                # print(\"錯誤: 無可用空間創建輸入.\")
+                # Handle this case: maybe return empty tensors or raise error
+                # For now, let it proceed, it will likely result in empty content parts.
+                pass
 
 
-        # === Step 4: Prompt 和 Responses Tokenization & FastLexRank (if applicable) ===
+        # === Step 4: Prompt 和 Responses Content Cleaning, Tokenization & Initial Setup ===
         prompt_prefix = "Q:"
         response_a_prefix = "A:"
         response_b_prefix = "B:"
 
-        # FIXED: Changed [\'input_ids\'] to ['input_ids']
-        response_a_ids_full = tokenizer(f"{response_a_prefix}{response_a}", add_special_tokens=False)['input_ids']
-        # FIXED: Changed [\'input_ids\'] to ['input_ids']
-        response_b_ids_full = tokenizer(f"{response_b_prefix}{response_b}", add_special_tokens=False)['input_ids']
+        # Cache for cleaned text to avoid redundant processing if apply_content_cleaning is True
+        cleaned_text_cache = {} 
 
-        prompt_ids_for_budgeting = []
+        # Determine the actual texts to be used for tokenization and LexRank
+        # These will be cleaned versions if apply_content_cleaning is True
+        actual_prompt_text = prompt
+        actual_response_a_text = response_a
+        actual_response_b_text = response_b
 
-        if include_prompt:
-            original_prompt_text_content = prompt
-            # FIXED: Changed [\\\'input_ids\\\'] to ['input_ids']
-            current_prompt_ids = tokenizer(f"{prompt_prefix}{original_prompt_text_content}", add_special_tokens=False)['input_ids']
-            prompt_ids_for_budgeting = current_prompt_ids
-
-            if use_fastlexrank_for_question:
-                estimated_tokens_with_original_prompt = len(current_prompt_ids) + len(response_a_ids_full) + len(response_b_ids_full)
-
-                if estimated_tokens_with_original_prompt > remaining_space_after_metadata:
-                    # print(f"INFO: Token overflow detected ({estimated_tokens_with_original_prompt} > {remaining_space_after_metadata}). Attempting FastLexRank for question.")
-                    # ADDED: Print original prompt before summarization attempt
-                    # print(f"      Original prompt (first 150 chars): '{original_prompt_text_content[:150]}...'")
-
-                    # Calculate available space for prompt *after* allocating for full responses
-                    max_tokens_for_summarized_prompt = remaining_space_after_metadata - (len(response_a_ids_full) + len(response_b_ids_full))
-                    max_tokens_for_summarized_prompt = max(0, max_tokens_for_summarized_prompt)
-
-                    min_tokens_for_summarized_prompt = fastlexrank_question_token_lower_bound
-
-                    if max_tokens_for_summarized_prompt >= min_tokens_for_summarized_prompt:
-                        summarized_ids = get_lexrank_summary_token_ids(
-                            original_prompt_text_content,
-                            tokenizer,
-                            min_tokens_for_summarized_prompt,
-                            max_tokens_for_summarized_prompt,
-                            len(current_prompt_ids),
-                            prefix=prompt_prefix
-                        )
-                        if summarized_ids is not None and len(summarized_ids) < len(current_prompt_ids):
-                            prompt_ids_for_budgeting = summarized_ids
-                            # ADDED: Decode and print summarized prompt
-                            summarized_prompt_text = tokenizer.decode(summarized_ids, skip_special_tokens=True)
-                            # print(f"INFO: FastLexRank applied. Prompt tokens reduced from {len(current_prompt_ids)} to {len(prompt_ids_for_budgeting)}.")
-                            # print(f"      Summarized prompt (first 150 chars): '{summarized_prompt_text[:150]}...'")
-                        else:
-                            # print("INFO: FastLexRank did not produce a shorter or suitable summary. Original prompt (or its truncation by later logic) will be used.")
-                            # ADDED: Print original prompt if summarization failed or was not better
-                            # print(f"      Using original prompt (first 150 chars): '{original_prompt_text_content[:150]}...'")
-                            pass
-                    else:
-                        pass
-                        # print(f"INFO: Not enough space for effective FastLexRank summarization of prompt (max_allowable: {max_tokens_for_summarized_prompt}, min_target: {min_tokens_for_summarized_prompt}). Prompt will be truncated by budgeting logic.")
-                        # ADDED: Print original prompt if not enough space for summarization
-                        # print(f"      Using original prompt (first 150 chars): '{original_prompt_text_content[:150]}...'")
-
-        # === Step 5: 智能 Prompt 和 Responses 預算分配 ===
-        prompt_ids_final = []
-
-        total_content_length_for_allocation = len(response_a_ids_full) + len(response_b_ids_full)
-        if include_prompt:
-            total_content_length_for_allocation += len(prompt_ids_for_budgeting)
-
-        if total_content_length_for_allocation <= remaining_space_after_metadata:
-            if include_prompt:
-                prompt_ids_final = prompt_ids_for_budgeting
-            response_a_ids_final = response_a_ids_full
-            response_b_ids_final = response_b_ids_full
-        else:
-            if include_prompt:
-                # Give prompt a slightly higher priority in allocation
-                prompt_ratio_numerator = len(prompt_ids_for_budgeting)
-                prompt_ratio = max(0.3, min(0.5, prompt_ratio_numerator / total_content_length_for_allocation if total_content_length_for_allocation > 0 else 0.3))
-
-                prompt_budget = int(remaining_space_after_metadata * prompt_ratio)
-                response_budget_total = remaining_space_after_metadata - prompt_budget
-
-                prompt_ids_final = prompt_ids_for_budgeting[:prompt_budget]
+        if apply_content_cleaning:
+            # Clean prompt text
+            if prompt in cleaned_text_cache: # Check cache using original prompt as key
+                actual_prompt_text = cleaned_text_cache[prompt]
             else:
-                response_budget_total = remaining_space_after_metadata
+                cleaned_version = MetadataFeatures.remove_special_content(prompt)
+                actual_prompt_text = cleaned_version
+                cleaned_text_cache[prompt] = cleaned_version # Cache the cleaned version
+            
+            # Clean response_a text
+            if response_a in cleaned_text_cache: # Check cache using original response_a as key
+                actual_response_a_text = cleaned_text_cache[response_a]
+            else:
+                cleaned_version = MetadataFeatures.remove_special_content(response_a)
+                actual_response_a_text = cleaned_version
+                cleaned_text_cache[response_a] = cleaned_version # Cache the cleaned version
 
-            response_budget_each = response_budget_total // 2
+            # Clean response_b text
+            if response_b in cleaned_text_cache: # Check cache using original response_b as key
+                actual_response_b_text = cleaned_text_cache[response_b]
+            else:
+                cleaned_version = MetadataFeatures.remove_special_content(response_b)
+                actual_response_b_text = cleaned_version
+                cleaned_text_cache[response_b] = cleaned_version # Cache the cleaned version
+        
+        # Tokenize full versions using the (potentially cleaned) texts
+        # The prefixes are added here before tokenization
+        prompt_ids_full = tokenizer(f"{prompt_prefix}{actual_prompt_text}", add_special_tokens=False)['input_ids'] if include_prompt else []
+        response_a_ids_full = tokenizer(f"{response_a_prefix}{actual_response_a_text}", add_special_tokens=False)['input_ids']
+        response_b_ids_full = tokenizer(f"{response_b_prefix}{actual_response_b_text}", add_special_tokens=False)['input_ids']
+        
+        prompt_current_ids = list(prompt_ids_full)
+        response_a_current_ids = list(response_a_ids_full)
+        response_b_current_ids = list(response_b_ids_full)
 
-            response_a_ids_final = response_a_ids_full[:response_budget_each]
-            response_b_ids_final = response_b_ids_full[:response_budget_each]
+        # The texts for LexRank will be the same (potentially cleaned) texts, 
+        # but WITHOUT prefixes, as get_lexrank_summary_token_ids adds its own prefix.
+        prompt_text_for_lexrank = actual_prompt_text if include_prompt else ""
+        response_a_text_for_lexrank = actual_response_a_text
+        response_b_text_for_lexrank = actual_response_b_text
 
-            # Re-distribute leftover space after integer division
-            used_space_by_content = len(response_a_ids_final) + len(response_b_ids_final)
-            if include_prompt:
-                used_space_by_content += len(prompt_ids_final)
+        # === Step 5: Iterative LexRank and Budgeting based on Priority (Meta > Resp > Prompt) ===
+        
+        # Initial check for total needed tokens
+        total_content_needed = (len(prompt_current_ids) if include_prompt else 0) + len(response_a_current_ids) + len(response_b_current_ids)
 
-            leftover = remaining_space_after_metadata - used_space_by_content
+        if total_content_needed > remaining_space_after_metadata:
+            # Overflow detected. Apply strategies based on priority.
 
-            if leftover > 0:
-                a_deficit = len(response_a_ids_full) - len(response_a_ids_final)
-                b_deficit = len(response_b_ids_full) - len(response_b_ids_final)
+            # --- Strategy for Prompt (P2 - lowest priority for LexRank application order) ---
+            if include_prompt and use_fastlexrank_for_question:
+                # Calculate space for prompt assuming responses take their current (possibly full) length
+                space_for_prompt_lexrank = remaining_space_after_metadata -(len(response_a_current_ids) + len(response_b_current_ids))
+                space_for_prompt_lexrank = max(0, space_for_prompt_lexrank)
 
-                can_give_a = min(a_deficit, leftover)
-                if can_give_a > 0:
-                    response_a_ids_final.extend(response_a_ids_full[len(response_a_ids_final) : len(response_a_ids_final) + can_give_a])
-                    leftover -= can_give_a
+                if space_for_prompt_lexrank >= fastlexrank_question_token_lower_bound:
+                    summarized_prompt_ids = get_lexrank_summary_token_ids(
+                        prompt_text_for_lexrank, tokenizer, # Use cleaned text for LexRank
+                        fastlexrank_question_token_lower_bound,
+                        space_for_prompt_lexrank,
+                        len(prompt_ids_full), # original length of full prompt_ids
+                        prefix=prompt_prefix
+                    )
+                    if summarized_prompt_ids and len(summarized_prompt_ids) < len(prompt_current_ids):
+                        prompt_current_ids = summarized_prompt_ids
+                        # print(f\"INFO: FastLexRank applied to Prompt. New length: {len(prompt_current_ids)}\")
+                total_content_needed = (len(prompt_current_ids) if include_prompt else 0) +  len(response_a_current_ids) + len(response_b_current_ids)
 
-                can_give_b = min(b_deficit, leftover)
-                if can_give_b > 0:
-                    response_b_ids_final.extend(response_b_ids_full[len(response_b_ids_final) : len(response_b_ids_final) + can_give_b])
-                    leftover -= can_give_b
 
-                if include_prompt and leftover > 0:
-                    p_deficit = len(prompt_ids_for_budgeting) - len(prompt_ids_final)
-                    can_give_p = min(p_deficit, leftover)
-                    if can_give_p > 0:
-                         prompt_ids_final.extend(prompt_ids_for_budgeting[len(prompt_ids_final) : len(prompt_ids_final) + can_give_p])
+            # --- Strategy for Responses (P1 retention priority; LexRank if shrinking prompt is insufficient) ---
+            if total_content_needed > remaining_space_after_metadata and use_fastlexrank_for_response:
+                space_for_responses_lexrank = remaining_space_after_metadata - (len(prompt_current_ids) if include_prompt else 0)
+                space_for_responses_lexrank = max(0, space_for_responses_lexrank)
 
-        # === Step 6: 組裝最終序列 ===
+                # NEW "Both or Neither" LexRank Logic for Responses
+                attempt_lexrank_for_responses_pair = False
+                # Only attempt if there's enough space for two summaries, each meeting the lower bound.
+                if space_for_responses_lexrank >= (2 * fastlexrank_response_token_lower_bound):
+                    attempt_lexrank_for_responses_pair = True
+
+                if attempt_lexrank_for_responses_pair:
+                    # Calculate target token counts for A and B, aiming for similar length and filling budget.
+                    target_max_a = space_for_responses_lexrank // 2
+                    target_max_b = space_for_responses_lexrank - target_max_a # B gets the remainder
+
+                    summarized_a_ids = get_lexrank_summary_token_ids(
+                        response_a_text_for_lexrank, tokenizer, # Use cleaned text
+                        fastlexrank_response_token_lower_bound, 
+                        target_max_a, # target max tokens for summary A
+                        len(response_a_ids_full), # original length of A
+                        prefix=response_a_prefix
+                    )
+                    summarized_b_ids = get_lexrank_summary_token_ids(
+                        response_b_text_for_lexrank, tokenizer, # Use cleaned text
+                        fastlexrank_response_token_lower_bound, 
+                        target_max_b, # target max tokens for summary B
+                        len(response_b_ids_full), # original length of B
+                        prefix=response_b_prefix
+                    )
+
+                    # Check if BOTH were successfully summarized (i.e., shorter than original AND not None)
+                    a_successfully_summarized = summarized_a_ids and len(summarized_a_ids) < len(response_a_ids_full)
+                    b_successfully_summarized = summarized_b_ids and len(summarized_b_ids) < len(response_b_ids_full)
+
+                    if a_successfully_summarized and b_successfully_summarized:
+                        response_a_current_ids = summarized_a_ids
+                        response_b_current_ids = summarized_b_ids
+                        # print(f\"INFO: FastLexRank applied to BOTH Response A (len: {len(response_a_current_ids)}) and B (len: {len(response_b_current_ids)}).\")
+                    else:
+                        # If not both successfully summarized, neither is applied.
+                        # Responses remain as they were before this paired attempt.
+                        # print(f\"INFO: FastLexRank for response pair failed or was not beneficial for both. Using original responses for budgeting.\")
+                        pass # No change to response_a_current_ids, response_b_current_ids
+                # else: (attempt_lexrank_for_responses_pair is False)
+                    # print(f\"INFO: Not enough space for paired response LexRank (each meeting lower bound). Using original responses for budgeting.\")
+                    # No change to response_a_current_ids, response_b_current_ids needed, they are already full.
+                
+                total_content_needed = (len(prompt_current_ids) if include_prompt else 0) + len(response_a_current_ids) + len(response_b_current_ids)
+
+        # === Step 6: Final Truncation if still overflowing (Priority: Meta > Resp > Prompt) === 
+        # Ensure prompt_final_ids is initialized even if include_prompt is False
+        if include_prompt:
+            prompt_final_ids = list(prompt_current_ids) # Make a copy to modify
+        else:
+            prompt_final_ids = [] 
+
+        response_a_final_ids = list(response_a_current_ids) # Make a copy
+        response_b_final_ids = list(response_b_current_ids) # Make a copy
+
+        current_len_content = (len(prompt_final_ids) if include_prompt else 0) + len(response_a_final_ids) + len(response_b_final_ids)
+
+        if current_len_content > remaining_space_after_metadata:
+            overflow = current_len_content - remaining_space_after_metadata
+
+            # Truncate Prompt (P2 - lowest priority)
+            if include_prompt and overflow > 0:
+                prompt_len_to_truncate = min(overflow, len(prompt_final_ids))
+                prompt_final_ids = prompt_final_ids[:len(prompt_final_ids) - prompt_len_to_truncate]
+                overflow -= prompt_len_to_truncate
+                # print(f\"INFO: Truncated Prompt by {prompt_len_to_truncate}. New length: {len(prompt_final_ids)}\")
+
+            # Truncate Responses (P1 - fairly) if overflow persists
+            if overflow > 0:
+                len_a_before_trunc = len(response_a_final_ids)
+                len_b_before_trunc = len(response_b_final_ids)
+                
+                # Target total length for responses after truncation
+                target_total_responses_len = (len_a_before_trunc + len_b_before_trunc) - overflow
+                target_total_responses_len = max(0, target_total_responses_len)
+
+                new_len_a = min(len_a_before_trunc, target_total_responses_len // 2 + target_total_responses_len % 2)
+                new_len_b = min(len_b_before_trunc, target_total_responses_len // 2)
+                
+                # If one response was shorter than its allocated share, give more to the other
+                if new_len_a < len_a_before_trunc and (new_len_a + len_b_before_trunc > target_total_responses_len):
+                     new_len_b = min(len_b_before_trunc, target_total_responses_len - new_len_a)
+                elif new_len_b < len_b_before_trunc and (len_a_before_trunc + new_len_b > target_total_responses_len):
+                     new_len_a = min(len_a_before_trunc, target_total_responses_len - new_len_b)
+                
+                response_a_final_ids = response_a_final_ids[:new_len_a]
+                response_b_final_ids = response_b_final_ids[:new_len_b]
+                # print(f\"INFO: Truncated Responses. A: {len(response_a_final_ids)}, B: {len(response_b_final_ids)}\")
+
+        # === Step 7: Redistribute Leftover Space to Maximize Budget Use ===
+        # (Priority: Responses, then Prompt)
+        current_used_by_content = (len(prompt_final_ids) if include_prompt else 0) + len(response_a_final_ids) + len(response_b_final_ids)
+        leftover = remaining_space_after_metadata - current_used_by_content
+
+        if leftover > 0:
+            # Try to add back to Response A
+            can_add_to_a = len(response_a_ids_full) - len(response_a_final_ids) # Diff from original full
+            add_to_a = min(leftover, can_add_to_a)
+            if add_to_a > 0:
+                # Append from the original full token list where it was truncated or summarized from
+                response_a_final_ids.extend(response_a_ids_full[len(response_a_final_ids) : len(response_a_final_ids) + add_to_a])
+                leftover -= add_to_a
+            
+            # Try to add back to Response B
+            can_add_to_b = len(response_b_ids_full) - len(response_b_final_ids)
+            add_to_b = min(leftover, can_add_to_b)
+            if add_to_b > 0:
+                response_b_final_ids.extend(response_b_ids_full[len(response_b_final_ids) : len(response_b_final_ids) + add_to_b])
+                leftover -= add_to_b
+
+            # Try to add back to Prompt
+            if include_prompt and leftover > 0:
+                # Ensure prompt_ids_full is available (it would be [] if include_prompt was false initially)
+                can_add_to_p = len(prompt_ids_full) - len(prompt_final_ids)
+                add_to_p = min(leftover, can_add_to_p)
+                if add_to_p > 0:
+                    prompt_final_ids.extend(prompt_ids_full[len(prompt_final_ids) : len(prompt_final_ids) + add_to_p])
+                    leftover -= add_to_p
+        
+        # === Step 8: 組裝最終序列 ===
         cls_id = tokenizer.cls_token_id
         sep_id = tokenizer.sep_token_id
         pad_id = tokenizer.pad_token_id
@@ -291,15 +403,15 @@ class UnifiedInputBuilder:
             final_input_ids.extend(metadata_ids)
             final_input_ids.append(sep_id)
 
-        if include_prompt and prompt_ids_final:
-            final_input_ids.extend(prompt_ids_final)
+        if include_prompt and prompt_final_ids: # Ensure prompt_final_ids is used
+            final_input_ids.extend(prompt_final_ids)
             final_input_ids.append(sep_id)
 
-        final_input_ids.extend(response_a_ids_final)
+        final_input_ids.extend(response_a_final_ids) # Use response_a_final_ids
         final_input_ids.append(sep_id)
-        final_input_ids.extend(response_b_ids_final)
+        final_input_ids.extend(response_b_final_ids) # Use response_b_final_ids
 
-        # === Step 7: 最終長度控制和填充 ===
+        # === Step 9: 最終長度控制和填充 === (Was Step 7)
         current_length = len(final_input_ids)
 
         if current_length > max_len:
@@ -313,12 +425,12 @@ class UnifiedInputBuilder:
         if padding_length > 0:
             final_input_ids.extend([pad_id] * padding_length)
 
-        # === Step 8: 生成詳細統計信息（調試用） ===
+        # === Step 10: 生成詳細統計信息（調試用） === (Was Step 8)
         # UnifiedInputBuilder._print_allocation_stats(
         #     len(metadata_ids),
-        #     len(prompt_ids_final) if include_prompt else 0,
-        #     len(response_a_ids_final),
-        #     len(response_b_ids_final),
+        #     len(prompt_final_ids) if include_prompt else 0, # Use prompt_final_ids
+        #     len(response_a_final_ids), # Use response_a_final_ids
+        #     len(response_b_final_ids), # Use response_b_final_ids
         #     current_length, max_len
         # )
 
@@ -425,8 +537,10 @@ if __name__ == '__main__':
 
     print("\n--- Test Case 1: Basic ---")
     # MODIFIED: Removed FastLexRank specific args from call as they are now hardcoded internally
+    # ADDED new response lexrank params to test calls
     output1 = UnifiedInputBuilder.create_unified_input(
-        tokenizer, prompt1, res_a1, res_b1, meta1, max_len=128, include_prompt=True
+        tokenizer, prompt1, res_a1, res_b1, meta1, max_len=128, include_prompt=True,
+        use_fastlexrank_for_response=True # Test with response lexrank
     )
     # FIXED: Corrected the key access syntax
     print(f"Input IDs length: {len(output1['input_ids'])}")
@@ -439,26 +553,31 @@ if __name__ == '__main__':
 
     print("\n--- Test Case 2: Overflow, FastLexrank Active ---")
     output2 = UnifiedInputBuilder.create_unified_input(
-        tokenizer, prompt2, res_a2, res_b2, meta2, max_len=128, include_prompt=True
+        tokenizer, prompt2, res_a2, res_b2, meta2, max_len=128, include_prompt=True,
+        use_fastlexrank_for_response=True
     )
     print(f"Input IDs length: {len(output2['input_ids'])}")
 
     print("\n--- Test Case 3: Overflow, FastLexrank Active, Tight Space ---")
     output3 = UnifiedInputBuilder.create_unified_input(
-        tokenizer, prompt2, res_a2, res_b2, meta2, max_len=80, include_prompt=True
+        tokenizer, prompt2, res_a2, res_b2, meta2, max_len=80, include_prompt=True,
+        use_fastlexrank_for_response=True
     )
     print(f"Input IDs length: {len(output3['input_ids'])}")
 
     print("\n--- Test Case 4: Overflow, (FastLexrank is now always active) ---")
     # NOTE: This test case will now behave like Test Case 2, as FastLexRank is always enabled internally.
     output4 = UnifiedInputBuilder.create_unified_input(
-        tokenizer, prompt2, res_a2, res_b2, meta2, max_len=128, include_prompt=True
+        tokenizer, prompt2, res_a2, res_b2, meta2, max_len=128, include_prompt=True,
+        use_fastlexrank_for_question=False, # Test with question lexrank off
+        use_fastlexrank_for_response=True
     )
     print(f"Input IDs length: {len(output4['input_ids'])}")
 
     print("\n--- Test Case 5: include_prompt=False ---")
     output5 = UnifiedInputBuilder.create_unified_input(
-        tokenizer, prompt2, res_a2, res_b2, meta2, max_len=128, include_prompt=False
+        tokenizer, prompt2, res_a2, res_b2, meta2, max_len=128, include_prompt=False,
+        use_fastlexrank_for_response=True
     )
     print(f"Input IDs length: {len(output5['input_ids'])}")
 
@@ -467,13 +586,57 @@ if __name__ == '__main__':
     res_b6 = "B." * 30
     print("\n--- Test Case 6: Very short prompt, overflow by responses ---")
     output6 = UnifiedInputBuilder.create_unified_input(
-        tokenizer, prompt6, res_a6, res_b6, meta1, max_len=100, include_prompt=True
+        tokenizer, prompt6, res_a6, res_b6, meta1, max_len=100, include_prompt=True,
+        use_fastlexrank_for_response=True
     )
     print(f"Input IDs length: {len(output6['input_ids'])}")
 
     print("\n--- Test Case 7: High lower bound, insufficient space ---")
     # NOTE: This test's behavior is now governed by the hardcoded lower bound (1).
     output7 = UnifiedInputBuilder.create_unified_input(
-        tokenizer, prompt2, res_a2, res_b2, meta2, max_len=100, include_prompt=True
+        tokenizer, prompt2, res_a2, res_b2, meta2, max_len=100, include_prompt=True,
+        fastlexrank_question_token_lower_bound=50, # High lower bound for question
+        use_fastlexrank_for_response=True,
+        fastlexrank_response_token_lower_bound=20 # High lower bound for response
     )
     print(f"Input IDs length: {len(output7['input_ids'])}")
+
+    print("\n--- Test Case 8: Response LexRank only, prompt fits but responses overflow ---")
+    short_prompt_for_resp_overflow = "This prompt is short."
+    long_res_a = "This is response A, and it is very long, designed to cause an overflow when combined with another long response, even if the prompt itself is short. We need many words here." * 3
+    long_res_b = "This is response B, similarly very long, also designed to cause an overflow. It mirrors the length of response A to test fairness in truncation or summarization." * 3
+    output8 = UnifiedInputBuilder.create_unified_input(
+        tokenizer, short_prompt_for_resp_overflow, long_res_a, long_res_b, meta1, max_len=150, include_prompt=True,
+        use_fastlexrank_for_question=False, # Question lexrank off
+        use_fastlexrank_for_response=True,
+        fastlexrank_response_token_lower_bound=10
+    )
+    print(f"Input IDs length: {len(output8['input_ids'])}")
+
+    print("\n--- Test Case 9: remove_special_blocks_for_response_lexrank=False (conceptual test) ---")
+    # This test is more about the parameter being passed, actual block removal isn't implemented here.
+    output9 = UnifiedInputBuilder.create_unified_input(
+        tokenizer, prompt1, res_a1, res_b1, meta1, max_len=128, include_prompt=True,
+        use_fastlexrank_for_response=True,
+        apply_content_cleaning=False # Test with cleaning off
+    )
+    print(f"Input IDs length: {len(output9['input_ids'])}")
+
+    print("\\n--- Test Case 10: Content Cleaning Active (Default) ---")
+    # Assuming prompt2, res_a2, res_b2 contain markdown that would be cleaned
+    # For example, add some mock markdown:
+    prompt_with_markdown = prompt2 + "\\n```python\\nprint('hello')\\n```"
+    res_a_with_markdown = res_a2 + "\\n$$E=mc^2$$"
+    res_b_with_markdown = res_b2 + "\\n|Header1|Header2|\\n|---|---|\\n|Data1|Data2|"
+    
+    output10 = UnifiedInputBuilder.create_unified_input(
+        tokenizer, prompt_with_markdown, res_a_with_markdown, res_b_with_markdown, meta2, max_len=128, 
+        include_prompt=True,
+        use_fastlexrank_for_question=True,
+        use_fastlexrank_for_response=True,
+        apply_content_cleaning=True # Explicitly test with cleaning on
+    )
+
+    print(f"Input IDs length: {len(output10['input_ids'])}")
+    # To verify cleaning, one would ideally inspect the summarized text if LexRank was triggered,
+    # or the input to LexRank. For now, we just ensure the parameter is passed.
