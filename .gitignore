@@ -137,7 +137,7 @@ env.bak/
 venv.bak/
 
 results/
-cache/
+
 train_with_language.parquet
 
 # Spyder project settings
