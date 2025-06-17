@@ -271,20 +271,56 @@ class EnhancedPipelineModules:
         # 分析數據特徵
         token_stats, optimized_allocation = EnhancedPreprocessing.analyze_data_characteristics(df, tokenizer)
         
-        # ===== 步驟1: 先進行 train/val 分割（使用原始數據） =====
-        print("  - Step 1: Splitting original data into train/validation sets...")
-        train_indices, val_indices, train_labels, val_labels = train_test_split(
-            df.index, df["label"].tolist(), 
-            test_size=config.VALIDATION_SIZE, 
-            random_state=config.RANDOM_STATE, 
-            stratify=df["label"]
-        )
+        # ===== 步驟1: 固定驗證集每個類別的數量 =====
+        print("  - Step 1: Creating validation set with fixed number per class...")
         
+        # 每個類別固定使用的驗證樣本數
+        FIXED_VAL_SAMPLES_PER_CLASS = 2000  # 每個類別固定200個樣本
+        
+        # 獲取類別分布
+        class_counts = df['label'].value_counts().sort_index()
+        print(f"  - Original class distribution: {dict(class_counts)}")
+        
+        val_indices = []
+        train_indices = []
+        
+        # 為每個類別分別選擇固定數量的驗證樣本
+        for label in sorted(df['label'].unique()):
+            class_indices = df[df['label'] == label].index.tolist()
+            
+            if len(class_indices) < FIXED_VAL_SAMPLES_PER_CLASS:
+                print(f"  - Warning: Class {label} has only {len(class_indices)} samples, using all for validation")
+                val_samples_for_class = len(class_indices)
+            else:
+                val_samples_for_class = FIXED_VAL_SAMPLES_PER_CLASS
+            
+            # 隨機選擇固定數量的驗證樣本
+            np.random.seed(config.RANDOM_STATE + label)  # 確保可重現性
+            selected_val_indices = np.random.choice(
+                class_indices, 
+                size=val_samples_for_class, 
+                replace=False
+            ).tolist()
+            
+            val_indices.extend(selected_val_indices)
+            
+            # 剩餘的作為訓練集
+            remaining_indices = [idx for idx in class_indices if idx not in selected_val_indices]
+            train_indices.extend(remaining_indices)
+            
+            print(f"  - Class {label}: {val_samples_for_class} validation, {len(remaining_indices)} training")
+        
+        # 創建訓練和驗證數據框
         train_df_original = df.loc[train_indices].reset_index(drop=True)
-        val_df = df.loc[val_indices].reset_index(drop=True)  # 驗證集保持純粹，不做任何增強
+        val_df = df.loc[val_indices].reset_index(drop=True)
         
-        print(f"  - Original training samples: {len(train_df_original)}")
-        print(f"  - Validation samples: {len(val_df)} (kept pure, no augmentation)")
+        # 提取標籤
+        train_labels = train_df_original["label"].tolist()
+        val_labels = val_df["label"].tolist()
+        
+        print(f"  - Final validation set class distribution: {dict(pd.Series(val_labels).value_counts().sort_index())}")
+        print(f"  - Total training samples: {len(train_df_original)}")
+        print(f"  - Total validation samples: {len(val_df)} (fixed per class)")
         
         # ===== 步驟2: 只對訓練集進行數據增強 =====
         if config.APPLY_AUGMENTATION:
