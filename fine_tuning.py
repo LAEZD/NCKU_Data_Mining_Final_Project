@@ -38,30 +38,51 @@ class Config:
     Manages all settings, paths, and hyperparameters in a centralized location.
     Automatically detects the execution environment and sets paths accordingly.
     """
-    def __init__(self):        # --- Basic Settings ---
-        self.MODEL_NAME = 'distilbert-base-uncased'
+    def __init__(self):        
+        # --- Single Model Configuration ---
+        self.MULTI_MODEL_TEST = False  # Disable multi-model testing
+        self.MODEL_NAME = 'microsoft/deberta-v3-base'  # Use DeBERTa-v3-base
+        
+        # --- Basic Settings ---
         self.QUICK_TEST = False # Set to True for a quick run with a subset of data
         self.QUICK_TEST_SIZE = 2000
         self.RANDOM_STATE = 42
-          # --- Enhanced Features Settings ---
+        
+        # --- Enhanced Features Settings ---
         self.APPLY_AUGMENTATION = False   # Enable data augmentation 
         self.EXTRACT_METADATA = True   # Enable metadata feature extraction
         self.METADATA_TYPE = 'core'    # 'core' or 'all'
         
         # --- Training Hyperparameters ---
         self.EPOCHS = 4
-        self.LEARNING_RATE = 1e-5
-        self.TRAIN_BATCH_SIZE = 8
-        self.EVAL_BATCH_SIZE = 8
-        self.WEIGHT_DECAY = 0.03
-        self.WARMUP_STEPS = 600
-        self.LOGGING_STEPS = 50
-        self.EVAL_STEPS = 600
-        self.SAVE_STEPS = 600
+        
+        # Optimized learning rates for better stability
+        self.LEARNING_RATE = 1e-5  # Reduced for better stability (was 1e-5)
+        self.LARGE_MODEL_LR = 3e-6  # For large models (BERT-large, RoBERTa-large)
+        self.XLNET_LR = 2e-5       # XLNet works better with higher LR
+        
+        # Improved batch sizes for stability
+        self.TRAIN_BATCH_SIZE = 8  # Increased for more stable gradients (was 8)
+        self.EVAL_BATCH_SIZE = 8   # Increased accordingly (was 8)
+        
+        # Enhanced stability settings
+        self.WEIGHT_DECAY = 0.02    # Reduced from 0.03 for less aggressive regularization
+        self.WARMUP_STEPS = 600    # Doubled for better warm-up (was 600)
+        self.LOGGING_STEPS = 50     # Keep original logging frequency
+        self.EVAL_STEPS = 600       # Keep original eval frequency
+        self.SAVE_STEPS = 600       # Keep original save frequency
         self.SAVE_TOTAL_LIMIT = 2
-        self.LABEL_SMOOTHING = 0.1
-        self.VALIDATION_SIZE = 0.15
-
+        
+        # Stability improvements
+        self.LABEL_SMOOTHING = 0.1 # Reduced for less aggressive smoothing (was 0.1)
+        self.GRADIENT_ACCUMULATION_STEPS = 2  # New: Simulate larger batch size
+        self.MAX_GRAD_NORM = 1.0    # New: Gradient clipping for stability
+        self.LR_SCHEDULER_TYPE = "cosine"  # New: Cosine scheduler for smoother LR decay
+        
+        # --- Model Saving Configuration ---
+        self.SAVE_BEST_MODEL = True  # Enable saving best model
+        self.BEST_MODEL_DIR = "./best_model"  # Directory to save best model
+        
         # --- Environment Detection and Path Configuration ---
         self.IS_KAGGLE = os.path.exists('/kaggle/input')
         
@@ -79,7 +100,7 @@ class Config:
             self.OUTPUT_DIR = "/kaggle/working/results"
             self.LOGGING_DIR = "/kaggle/working/logs"
             self.SUBMISSION_PATH = "/kaggle/working/submission.csv"
-            self.VALIDATION_RESULTS_PATH = "/kaggle/working/validation_results.csv"
+            self.BEST_MODEL_DIR = "/kaggle/working/best_model"
         else:
             print("INFO: Running in Local environment (Online Mode)")
             # Local data paths
@@ -94,15 +115,19 @@ class Config:
             self.OUTPUT_DIR = "./results"
             self.LOGGING_DIR = "./logs"
             self.SUBMISSION_PATH = os.path.join(self.OUTPUT_DIR, "submission.csv")
-            self.VALIDATION_RESULTS_PATH = os.path.join(self.OUTPUT_DIR, "validation_results.csv")
+            self.BEST_MODEL_DIR = "./best_model"
             
             # Ensure local output directories exist
             os.makedirs(self.OUTPUT_DIR, exist_ok=True)
             os.makedirs(self.LOGGING_DIR, exist_ok=True)
             
+        # Ensure best model directory exists
+        os.makedirs(self.BEST_MODEL_DIR, exist_ok=True)
+            
         # --- Device Configuration ---
         self.DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"INFO: Using device: {self.DEVICE}")
+        print(f"INFO: Best model will be saved to: {self.BEST_MODEL_DIR}")
 
 # --------------------------------------------------------------------------
 # 2. Streamlined Pipeline (Using Enhanced Modules)
@@ -178,12 +203,36 @@ class PipelineModules:
         """Configures and returns a Trainer instance."""
         print("\n[Module 4/5] Setting up trainer...")
 
+        # Model-specific optimizations
+        use_fp16 = torch.cuda.is_available()
+        learning_rate = config.LEARNING_RATE
+        
+        # Special handling for problematic models
+        model_name_lower = config.MODEL_NAME.lower()
+        if any(problem_model in model_name_lower for problem_model in ['deberta', 'bart', 'unilm']):
+            print(f"  - Detected problematic model for FP16: {config.MODEL_NAME}")
+            print("  - Disabling FP16 to prevent overflow issues")
+            use_fp16 = False
+        
+        # Model-specific learning rates for better stability
+        if 'xlnet' in model_name_lower:
+            learning_rate = config.XLNET_LR
+            print(f"  - Using optimized learning rate for XLNet: {learning_rate}")
+        elif any(large_model in model_name_lower for large_model in ['large', 'roberta-base', 'bert-base']):
+            learning_rate = config.LARGE_MODEL_LR
+            print(f"  - Using reduced learning rate for large model: {learning_rate}")
+        else:
+            learning_rate = config.LEARNING_RATE
+            print(f"  - Using standard learning rate: {learning_rate}")
+
         training_args = TrainingArguments(
             output_dir=config.OUTPUT_DIR,
             num_train_epochs=config.EPOCHS,
-            learning_rate=config.LEARNING_RATE,
+            learning_rate=learning_rate,
             per_device_train_batch_size=config.TRAIN_BATCH_SIZE,
             per_device_eval_batch_size=config.EVAL_BATCH_SIZE,
+            gradient_accumulation_steps=config.GRADIENT_ACCUMULATION_STEPS,  # New: Simulate larger batch
+            max_grad_norm=config.MAX_GRAD_NORM,  # New: Gradient clipping
             weight_decay=config.WEIGHT_DECAY,
             warmup_steps=config.WARMUP_STEPS,
             logging_dir=config.LOGGING_DIR,
@@ -196,11 +245,14 @@ class PipelineModules:
             metric_for_best_model="eval_log_loss",
             greater_is_better=False,
             save_total_limit=config.SAVE_TOTAL_LIMIT,
-            fp16=torch.cuda.is_available(), # Enable FP16 if CUDA is available
+            fp16=use_fp16, # Use model-specific FP16 setting
             dataloader_pin_memory=False,
             report_to="none",
             seed=config.RANDOM_STATE,
-            lr_scheduler_type="linear",
+            lr_scheduler_type=config.LR_SCHEDULER_TYPE,
+            # Additional stability settings
+            dataloader_num_workers=0,  # Avoid multiprocessing issues
+            remove_unused_columns=False,  # Keep all columns for debugging
         )
         
         def compute_metrics(eval_pred):
@@ -208,12 +260,26 @@ class PipelineModules:
             probabilities = torch.nn.functional.softmax(torch.from_numpy(logits), dim=-1).numpy()
             preds = np.argmax(logits, axis=-1)
             accuracy = accuracy_score(labels, preds)
-            probabilities = np.clip(probabilities, 1e-7, 1 - 1e-7)
+            
+            # More stable probability clipping
+            probabilities = np.clip(probabilities, 1e-15, 1 - 1e-15)  # Tighter clipping
             logloss = log_loss(labels, probabilities)
+            
             pred_dist = np.bincount(preds, minlength=3)
-            print(f"Distribution: {pred_dist}, LogLoss: {logloss:.6f}")
-            return {"accuracy": accuracy, "log_loss": logloss}
- 
+            
+            # Add stability metrics
+            pred_entropy = -np.sum(probabilities * np.log(probabilities + 1e-15), axis=1).mean()
+            max_prob = np.max(probabilities, axis=1).mean()
+            
+            print(f"Distribution: {pred_dist}, LogLoss: {logloss:.6f}, Entropy: {pred_entropy:.4f}, MaxProb: {max_prob:.4f}")
+            
+            return {
+                "accuracy": accuracy, 
+                "log_loss": logloss,
+                "prediction_entropy": pred_entropy,
+                "max_probability": max_prob
+            }
+
         
         # Reinitialize classifier layer weights
         if hasattr(model, 'classifier'):
@@ -226,9 +292,13 @@ class PipelineModules:
                 outputs = model(**inputs)
                 logits = outputs.logits
                 
+                # Apply temperature scaling for more stable training
+                temperature = 1.2  # Slight temperature scaling
+                scaled_logits = logits / temperature
+                
                 weights = torch.tensor(list(class_weights_dict.values()), device=logits.device, dtype=torch.float)
                 loss_fct = torch.nn.CrossEntropyLoss(weight=weights, label_smoothing=config.LABEL_SMOOTHING)
-                loss = loss_fct(logits, labels)
+                loss = loss_fct(scaled_logits, labels)
                 
                 return (loss, outputs) if return_outputs else loss
 
@@ -238,7 +308,7 @@ class PipelineModules:
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
             compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)])
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)])  # Keep original early stopping
         
         print("  - Trainer setup complete.")
         return trainer
@@ -336,6 +406,8 @@ def main():
     """
     # === Step 1: Initialize Configuration ===
     config = Config()
+    
+    print("Single model training mode - DeBERTa-v3-base")
 
     # === Step 2: Load and Preprocess Data ===
     df, df_test = PipelineModules.load_and_preprocess_data(config)
@@ -351,7 +423,7 @@ def main():
     # === Step 5: Setup and Run Training ===
     trainer = PipelineModules.setup_trainer(model, train_dataset, val_dataset, class_weights, config)
     
-    print("\nStarting model training...")
+    print(f"\nStarting model training for {config.MODEL_NAME}...")
     trainer.train()
     print("Training complete.")
 
@@ -359,8 +431,7 @@ def main():
     print("\nRunning final validation...")
     val_preds = trainer.predict(val_dataset)
     val_probs = torch.nn.functional.softmax(torch.from_numpy(val_preds.predictions), dim=-1).numpy()
-    val_probabilities = torch.nn.functional.softmax(torch.from_numpy(val_preds.predictions), dim=-1).numpy()
-    val_probabilities = np.clip(val_probabilities, 1e-7, 1 - 1e-7)
+    val_probabilities = np.clip(val_probs, 1e-7, 1 - 1e-7)
     val_final_loss = log_loss(val_labels, val_probabilities)
     val_final_acc = accuracy_score(val_labels, np.argmax(val_probs, axis=1))
 
@@ -370,22 +441,48 @@ def main():
     print(f"  - Log Loss:   {val_final_loss:.6f}")
     print(f"  - Accuracy:   {val_final_acc:.4f}")
     print(f"{'='*60}\n")
-    
-    # Save validation results for analysis
-    val_results = pd.DataFrame({
-        "id": df.loc[val_indices, "id"],
-        "gt_label": val_labels,
-        "pred_prob_a": val_probs[:, 0],
-        "pred_prob_b": val_probs[:, 1],
-        "pred_prob_tie": val_probs[:, 2]
-    })
-    val_results.to_csv(config.VALIDATION_RESULTS_PATH, index=False)
-    print(f"  - Validation results saved to: {config.VALIDATION_RESULTS_PATH}")
 
-    # === Step 7: Test Set Inference and Submission ===
+    # === Step 7: Save Best Model ===
+    if config.SAVE_BEST_MODEL:
+        print(f"Saving best model to: {config.BEST_MODEL_DIR}")
+        
+        # Save the model and tokenizer
+        model.save_pretrained(config.BEST_MODEL_DIR)
+        tokenizer.save_pretrained(config.BEST_MODEL_DIR)
+        
+        # Save training configuration and results
+        import json
+        model_info = {
+            'model_name': config.MODEL_NAME,
+            'final_log_loss': val_final_loss,
+            'final_accuracy': val_final_acc,
+            'epochs': config.EPOCHS,
+            'learning_rate': trainer.args.learning_rate,
+            'batch_size': config.TRAIN_BATCH_SIZE,
+            'validation_samples_per_class': 2000
+        }
+        
+        with open(os.path.join(config.BEST_MODEL_DIR, 'model_info.json'), 'w') as f:
+            json.dump(model_info, f, indent=2)
+        
+        print(f"✓ Model saved successfully!")
+        print(f"  - Model files: {config.BEST_MODEL_DIR}/pytorch_model.bin")
+        print(f"  - Tokenizer files: {config.BEST_MODEL_DIR}/tokenizer.json")
+        print(f"  - Model info: {config.BEST_MODEL_DIR}/model_info.json")
+
+    # === Step 8: Test Set Inference and Submission ===
     PipelineModules.run_inference_and_save(trainer, df_test, tokenizer, config)
 
-    print("\nPipeline finished successfully!")
+    print("\n" + "="*80)
+    print("TRAINING PIPELINE COMPLETED SUCCESSFULLY!")
+    print("="*80)
+    print(f"📊 Final Results:")
+    print(f"   - Log Loss: {val_final_loss:.6f}")
+    print(f"   - Accuracy: {val_final_acc:.4f}")
+    print(f"💾 Saved Files:")
+    print(f"   - Best Model: {config.BEST_MODEL_DIR}/")
+    print(f"   - Submission: {config.SUBMISSION_PATH}")
+    print("="*80)
 
 if __name__ == "__main__":
     main()

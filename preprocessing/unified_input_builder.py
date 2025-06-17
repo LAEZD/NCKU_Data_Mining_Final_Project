@@ -43,7 +43,7 @@ CREATE_UNIFIED_INPUT_FASTLEXRANK_RESPONSE_LOWER_BOUND_DEFAULT = 10
 # RENAMED and UPDATED: Default for applying content cleaning to prompt/responses before tokenization and LexRank
 APPLY_CONTENT_CLEANING_DEFAULT = True
 # NEW: Switch for fixed input format
-USE_FIXED_FORMAT_DEFAULT = True # You can change this to True if you want fixed format by default
+USE_FIXED_FORMAT_DEFAULT = False # You can change this to True if you want fixed format by default
 
 
 
