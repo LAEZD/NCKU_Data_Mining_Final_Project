@@ -25,7 +25,7 @@ from transformers import (
 from sklearn.metrics import accuracy_score, log_loss
 from dual_encoder import DualTowerPairClassifier
 from dual_dataset import DualTowerPairDataset
-import json, shutil, pathlib
+import json, shutil, pathlib, datetime
 
 # Import enhanced preprocessing modules
 from preprocessing.enhanced_preprocessing import EnhancedPipelineModules, EnhancedTestDataset
@@ -57,7 +57,7 @@ class Config:
         self.TRAIN_BATCH_SIZE = 8
         self.EVAL_BATCH_SIZE = 8
         self.WEIGHT_DECAY = 0.07114476009343425
-        self.WARMUP_STEPS = 0.06
+        self.WARMUP_RATIO = 0.06
         self.LOGGING_STEPS = 50
         self.EVAL_STEPS = 600
         self.SAVE_STEPS = 600
@@ -237,7 +237,7 @@ class PipelineModules:
             dataloader_pin_memory=False,
             report_to="none",
             seed=config.RANDOM_STATE,
-            lr_scheduler_type="linear",
+            lr_scheduler_type=config.LR_SCHEDULER_TYPE,
         )
         
         def compute_metrics(eval_pred):
@@ -364,6 +364,54 @@ class PipelineModules:
             dummy_sub = pd.DataFrame({"id": [0], "winner_model_a": [0.33], "winner_model_b": [0.33], "winner_tie": [0.34]})
             dummy_sub.to_csv(config.SUBMISSION_PATH, index=False)
 
+
+def maybe_save_global_best(val_loss, val_acc, trainer, tokenizer, config, extra_info=None):
+    """
+    比較目前 val_loss 與歷史最佳；若更好就覆蓋 global_best_model/ 並寫 metrics.json
+    """
+    best_dir  = pathlib.Path(config.GLOBAL_BEST_DIR)
+    best_json = best_dir / "metrics.json"
+
+    # 讀取舊紀錄
+    old_loss = None
+    if best_json.exists():
+        try:
+            with open(best_json, "r") as f:
+                old_loss = json.load(f)["log_loss"]
+        except Exception:
+            pass
+
+    if (old_loss is None) or (val_loss < old_loss - 1e-6):
+        print(f"🎉  New global best!  LogLoss {val_loss:.6f}" + (f"  < {old_loss:.6f}" if old_loss else ""))
+        # 覆蓋模型目錄
+        if best_dir.exists():
+            shutil.rmtree(best_dir)
+        trainer.save_model(best_dir)
+        tokenizer.save_pretrained(best_dir)
+
+        # 存新指標
+        metrics = {
+            "timestamp" : datetime.datetime.now().isoformat(timespec="seconds"),
+            "log_loss"  : float(val_loss),
+            "accuracy"  : float(val_acc),
+            "model_arch": config.MODEL_ARCH,
+            "hyperparams": {
+                "learning_rate" : config.LEARNING_RATE,
+                "weight_decay"  : config.WEIGHT_DECAY,
+                "label_smoothing": config.LABEL_SMOOTHING,
+                "epochs"        : config.EPOCHS,
+                "batch_size"    : config.TRAIN_BATCH_SIZE,
+                "max_len"       : 512 if config.MODEL_ARCH=="dual" else 512,
+                "warmup_ratio"  : getattr(config, "WARMUP_RATIO", None),
+                "lr_scheduler"  : trainer.args.lr_scheduler_type,
+            }
+        }
+        if extra_info:
+            metrics.update(extra_info)
+        best_dir.mkdir(parents=True, exist_ok=True)
+        with open(best_json, "w") as f:
+            json.dump(metrics, f, indent=2)
+
 # --------------------------------------------------------------------------
 # 3. Main Execution Flow
 # --------------------------------------------------------------------------
@@ -408,52 +456,8 @@ def main():
     print(f"  - Accuracy:   {val_final_acc:.4f}")
     print(f"{'='*60}\n")
 
-    best_dir   = pathlib.Path(config.GLOBAL_BEST_DIR)
-    best_json  = pathlib.Path(config.GLOBAL_METRIC_JSON)
+    maybe_save_global_best(val_final_loss, val_final_acc, trainer, tokenizer, config)
 
-    # 讀取舊紀錄（若存在）
-    previous_best = None
-    if best_json.exists():
-        try:
-            with open(best_json, "r") as f:
-                previous_best = json.load(f)      # 內容：{"log_loss": 1.0123, "accuracy": 0.56, "params": {...}}
-        except Exception as e:
-            print(f"⚠️  Failed to read previous best metrics: {e}")
-
-    improved = (previous_best is None) or (val_final_loss < previous_best["log_loss"] - 1e-6)
-
-    if improved:
-        print(f"🎉 New global-best model!  LogLoss {val_final_loss:.6f}  (< {previous_best['log_loss']:.6f} )" if previous_best else "🎉 First global-best model saved!")
-        
-        # 1) 儲存模型到 GLOBAL_BEST_DIR（清空後覆蓋）
-        if best_dir.exists():
-            shutil.rmtree(best_dir)
-        trainer.save_model(best_dir)
-        
-        # 2) 將 tokenizer 也一併存入（之後推論用得到）
-        tokenizer.save_pretrained(best_dir)
-        
-        # 3) 儲存指標 & 超參數
-        metrics_info = {
-            "log_loss"  : float(val_final_loss),
-            "accuracy"  : float(val_final_acc),
-            "model_arch": config.MODEL_ARCH,
-            "hyperparams": {
-                "learning_rate" : config.LEARNING_RATE,
-                "weight_decay"  : config.WEIGHT_DECAY,
-                "label_smoothing": config.LABEL_SMOOTHING,
-                "epochs"        : config.EPOCHS,
-                "batch_size"    : config.TRAIN_BATCH_SIZE,
-                "max_len"       : 512 if config.MODEL_ARCH=="dual" else 512,
-                "lr_scheduler"  : trainer.args.lr_scheduler_type,
-                "warmup_steps"  : config.WARMUP_STEPS
-            }
-        }
-        with open(best_json, "w") as f:
-            json.dump(metrics_info, f, indent=2)
-    else:
-        print(f"Global-best not beaten (current {val_final_loss:.6f}  vs  best {previous_best['log_loss']:.6f}).")
-    
     # Save validation results for analysis
     val_results = pd.DataFrame({
         "id": df.loc[val_indices, "id"],
@@ -517,6 +521,9 @@ def run_once_with_config(config):
     # 讓外部（Optuna）可以拿到最佳 checkpoint 路徑
     trainer.save_model(config.OUTPUT_DIR)              # 確保有存
     run_once_with_config.best_ckpt_dir = trainer.state.best_model_checkpoint
+
+    maybe_save_global_best(logloss, acc, trainer, tokenizer, config,
+                       extra_info={"trial_id": getattr(config, "OPTUNA_TRIAL_ID", None)})
 
     return logloss, acc
 

@@ -17,6 +17,7 @@ random.seed(SEED)
 
 def objective(trial):
     cfg = fine_tuning.Config()
+    cfg.OPTUNA_TRIAL_ID = trial.number 
 
     #── 搜參 ──
     cfg.LEARNING_RATE   = trial.suggest_float("lr", 1e-6, 1e-3, log=True)
