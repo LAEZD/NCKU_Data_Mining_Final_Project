@@ -34,7 +34,7 @@ except Exception as e: # Catch other potential errors during NLTK setup
 
 # Settings for UnifiedInputBuilder.create_unified_input\'s FastLexRank behavior
 # These are used as default values for the corresponding parameters in create_unified_input.
-CREATE_UNIFIED_INPUT_USE_FASTLEXRANK_DEFAULT = True
+CREATE_UNIFIED_INPUT_USE_FASTLEXRANK_DEFAULT = True 
 CREATE_UNIFIED_INPUT_FASTLEXRANK_LOWER_BOUND_DEFAULT = 1
 INCLUDE_PROMPT_DEFAULT = True
 # NEW: Defaults for response FastLexRank
@@ -44,7 +44,6 @@ CREATE_UNIFIED_INPUT_FASTLEXRANK_RESPONSE_LOWER_BOUND_DEFAULT = 10
 APPLY_CONTENT_CLEANING_DEFAULT = True
 # NEW: Switch for fixed input format
 USE_FIXED_FORMAT_DEFAULT = True # You can change this to True if you want fixed format by default
-
 
 
 def get_lexrank_summary_token_ids(
@@ -58,6 +57,7 @@ def get_lexrank_summary_token_ids(
     """
     Generates a summary of the prompt using LexRank and tokenizes it.
     Tries to find a summary that is shorter than the original and fits within token budget.
+    Prefers SHORTER summaries that meet the minimum requirement.
     """
     if not original_prompt_text.strip():
         return None
@@ -105,6 +105,72 @@ def get_lexrank_summary_token_ids(
             return None
 
     return best_summary_ids
+
+
+def get_lexrank_summary_token_ids_for_response(
+    original_text: str,
+    tokenizer,
+    target_min_tokens: int,
+    target_max_tokens: int,
+    original_text_token_len: int,
+    prefix: str = "A:"
+) -> Union[List[int], None]:
+    """
+    (優化後版本)
+    Generates a summary of the response text using LexRank.
+    It runs the summarizer ONCE to get a ranked list of sentences.
+    Then, it iterates to find the LONGEST summary that fits the budget.
+    """
+    if not original_text.strip():
+        return None
+
+    try:
+        parser = PlaintextParser.from_string(original_text, SumyTokenizer("english"))
+        summarizer = LexRankSummarizer()
+        document_sentences = list(parser.document.sentences)
+        if not document_sentences:
+            return None
+    except Exception as e:
+        print(f"WARNING: Failed to initialize LexRank components for response summarization. Error: {e}")
+        return None
+
+    # --- 優化核心 ---
+    # 1. 只運行一次 LexRank 來獲取所有句子的重要性排序
+    #    我們請求摘要的句子數等於總句數，這樣會返回一個按重要性排序的句子列表
+    try:
+        # The summarizer returns sentences ordered by their rank.
+        ranked_sentences = summarizer(parser.document, sentences_count=len(document_sentences))
+    except Exception as e:
+        print(f"WARNING: LexRank summarization for response failed. Error: {e}")
+        return None
+
+    best_summary_ids = None
+
+    # 2. 從最長的摘要開始，向下迭代尋找第一個符合條件的摘要
+    #    這樣找到的第一個就是我們想要的「最長且符合條件」的摘要
+    for num_sents in range(len(ranked_sentences), 0, -1):
+        # 從已排序的列表中取出前 num_sents 個句子
+        current_summary_sentences = ranked_sentences[:num_sents]
+        summary_text = " ".join([str(s) for s in current_summary_sentences])
+
+        if not summary_text.strip():
+            continue
+
+        current_summary_ids = tokenizer(f"{prefix}{summary_text}", add_special_tokens=False)['input_ids']
+        current_summary_token_len = len(current_summary_ids)
+
+        is_shorter_than_original = (current_summary_token_len < original_text_token_len)
+        is_within_max_budget = (current_summary_token_len <= target_max_tokens)
+        meets_min_budget = (current_summary_token_len >= target_min_tokens)
+
+        if is_shorter_than_original and is_within_max_budget and meets_min_budget:
+            # 找到了！這是符合條件的最長摘要，直接返回
+            return current_summary_ids
+    
+    # 如果循環結束都沒有找到符合所有條件的摘要，返回 None
+    # （原始邏輯是會保留一個不滿足最低長度但比原始短的摘要，這裡為了簡潔，可以根據需求調整）
+    return None
+
 
 class UnifiedInputBuilder:
     """
@@ -277,35 +343,30 @@ class UnifiedInputBuilder:
                 attempt_lexrank_for_responses_pair = False
                 # Only attempt if there's enough space for two summaries, each meeting the lower bound.
                 if space_for_responses_lexrank >= (2 * fastlexrank_response_token_lower_bound):
-                    attempt_lexrank_for_responses_pair = True
+                    space_for_responses_lexrank_per_response = space_for_responses_lexrank // 2 # Max budget for each response summary
 
-                if attempt_lexrank_for_responses_pair:
-                    # Calculate target token counts for A and B, aiming for similar length and filling budget.
-                    target_max_a = space_for_responses_lexrank // 2
-                    target_max_b = space_for_responses_lexrank - target_max_a # B gets the remainder
-
-                    summarized_a_ids = get_lexrank_summary_token_ids(
-                        response_a_text_for_lexrank, tokenizer, # Use cleaned text
-                        fastlexrank_response_token_lower_bound, 
-                        target_max_a, # target max tokens for summary A
-                        len(response_a_ids_full), # original length of A
+                    # Try LexRank for Response A using the new function
+                    summary_a_ids = get_lexrank_summary_token_ids_for_response(
+                        response_a_text_for_lexrank,
+                        tokenizer,
+                        fastlexrank_response_token_lower_bound,
+                        space_for_responses_lexrank_per_response,
+                        len(response_a_ids_full), # original token length (with prefix)
                         prefix=response_a_prefix
                     )
-                    summarized_b_ids = get_lexrank_summary_token_ids(
-                        response_b_text_for_lexrank, tokenizer, # Use cleaned text
-                        fastlexrank_response_token_lower_bound, 
-                        target_max_b, # target max tokens for summary B
-                        len(response_b_ids_full), # original length of B
+                    # Try LexRank for Response B using the new function
+                    summary_b_ids = get_lexrank_summary_token_ids_for_response(
+                        response_b_text_for_lexrank,
+                        tokenizer,
+                        fastlexrank_response_token_lower_bound,
+                        space_for_responses_lexrank_per_response,
+                        len(response_b_ids_full), # original token length (with prefix)
                         prefix=response_b_prefix
                     )
 
-                    # Check if BOTH were successfully summarized (i.e., shorter than original AND not None)
-                    a_successfully_summarized = summarized_a_ids and len(summarized_a_ids) < len(response_a_ids_full)
-                    b_successfully_summarized = summarized_b_ids and len(summarized_b_ids) < len(response_b_ids_full)
-
-                    if a_successfully_summarized and b_successfully_summarized:
-                        response_a_current_ids = summarized_a_ids
-                        response_b_current_ids = summarized_b_ids
+                    if summary_a_ids is not None and summary_b_ids is not None:
+                        response_a_current_ids = summary_a_ids
+                        response_b_current_ids = summary_b_ids
                         # print(f\"INFO: FastLexRank applied to BOTH Response A (len: {len(response_a_current_ids)}) and B (len: {len(response_b_current_ids)}).\")
                     else:
                         # If not both successfully summarized, neither is applied.
