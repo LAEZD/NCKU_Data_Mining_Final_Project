@@ -16,12 +16,17 @@ class DualTowerPairClassifier(nn.Module):
         base_model: str = "distilbert-base-uncased",
         hidden_size: int = 768,
         dropout: float = 0.2,
+        metadata_feature_size: int = 0, # 新增：metadata 特徵數量
     ):
         super().__init__()
         self.encoder = AutoModel.from_pretrained(base_model)
         self.dropout = nn.Dropout(dropout)
+        
+        # 計算分類器的輸入維度
+        classifier_input_size = hidden_size * 5 + metadata_feature_size
+        
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_size * 5, hidden_size),
+            nn.Linear(classifier_input_size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, 3),
         )
@@ -41,15 +46,24 @@ class DualTowerPairClassifier(nn.Module):
         a_attention_mask: torch.Tensor,
         b_input_ids: torch.Tensor,
         b_attention_mask: torch.Tensor,
+        metadata_features: Optional[torch.Tensor] = None, # 新增：metadata 輸入
         labels: Optional[torch.Tensor] = None,
     ):
         v_p = self.encode(p_input_ids, p_attention_mask)
         v_a = self.encode(a_input_ids, a_attention_mask)
         v_b = self.encode(b_input_ids, b_attention_mask)
 
-        feat = torch.cat(
+        # 基礎特徵
+        feat_base = torch.cat(
             [v_p, v_a, torch.abs(v_p - v_a), v_b, torch.abs(v_p - v_b)], dim=-1
         )
+
+        # 如果有 metadata，就把它們串接起來
+        if metadata_features is not None:
+            feat = torch.cat([feat_base, metadata_features], dim=-1)
+        else:
+            feat = feat_base
+            
         logits = self.classifier(self.dropout(feat))
 
         loss = None

@@ -18,14 +18,13 @@ class MetadataFeatures:
     """
     元數據特徵提取類，提供四個核心特徵的計算方法
     """
-    REMOVE_SPECIAL_BLOCKS = True  # 控制是否移除特殊區塊的開關
 
     @staticmethod
-    def remove_special_content(text: str) -> str:
+    def remove_special_content(text: str, remove_special_blocks: bool = None) -> str:
         """
-        如果 REMOVE_SPECIAL_BLOCKS 為 True，則移除程式碼、數學公式和表格區塊。
+        如果 remove_special_blocks 為 True，則移除程式碼、數學公式和表格區塊。
         """
-        if not MetadataFeatures.REMOVE_SPECIAL_BLOCKS or not isinstance(text, str):
+        if not remove_special_blocks or not isinstance(text, str):
             return text
 
         # 移除程式碼區塊
@@ -212,12 +211,16 @@ class MetadataFeatures:
         response_b_raw = str(row.get('response_b', ''))
 
         # 根據開關決定是否預處理文本 (僅用於 Jaccard 和 TTR)
-        if MetadataFeatures.REMOVE_SPECIAL_BLOCKS:
-            response_a_for_jaccard_ttr = MetadataFeatures.remove_special_content(response_a_raw)
-            response_b_for_jaccard_ttr = MetadataFeatures.remove_special_content(response_b_raw)
-        else:
-            response_a_for_jaccard_ttr = response_a_raw
-            response_b_for_jaccard_ttr = response_b_raw
+        response_a_for_jaccard_ttr = MetadataFeatures.remove_special_content(response_a_raw)
+        response_b_for_jaccard_ttr = MetadataFeatures.remove_special_content(response_b_raw)
+
+        # 計算原始差異值
+        length_diff = MetadataFeatures.calculate_length_diff(response_a_raw, response_b_raw)
+        content_blocks_diff = MetadataFeatures.calculate_content_blocks_diff(response_a_raw, response_b_raw)
+
+        # 使用對數變換來縮放特徵，同時保留正負號
+        scaled_length_diff = np.sign(length_diff) * np.log1p(abs(length_diff))
+        scaled_content_blocks_diff = np.sign(content_blocks_diff) * np.log1p(abs(content_blocks_diff))
 
         core_features = {
             # Jaccard 和 TTR 使用可能被處理過的文本
@@ -230,15 +233,9 @@ class MetadataFeatures:
                                 response_b_for_jaccard_ttr
                         ),
             
-            # Content blocks diff 和 Length diff 始終使用原始文本
-            'content_blocks_diff': MetadataFeatures.calculate_content_blocks_diff(
-                                response_a_raw, 
-                                response_b_raw
-                               ),
-            'length_diff': MetadataFeatures.calculate_length_diff(
-                                response_a_raw, 
-                                response_b_raw
-                           )
+            # Content blocks diff 和 Length diff 使用縮放後的值
+            'content_blocks_diff': scaled_content_blocks_diff,
+            'length_diff': scaled_length_diff
         }
         
         return core_features
@@ -424,4 +421,105 @@ class MetadataFeatures:
             feature_vector.append(float(value))
         
         return feature_vector
+
+    @staticmethod
+    def _calculate_features(text: str) -> dict:
+        """
+        計算文本的所有元數據特徵
+        
+        Args:
+            text (str): 輸入文本
+            
+        Returns:
+            dict: 包含所有特徵的字典
+        """
+        if not isinstance(text, str):
+            return {}
+        
+        # 計算字元數、詞彙數、句子數
+        char_count = len(text)
+        word_count = len(text.split())
+        sentence_count = text.count('.') + text.count('!') + text.count('?')
+        
+        # 計算平均詞彙長度
+        avg_word_length = char_count / word_count if word_count > 0 else 0
+        
+        # 計算獨特詞彙比例
+        unique_word_ratio = MetadataFeatures.calculate_ttr(text)
+        
+        # 停用詞和標點符號計數
+        stopwords = set(['的', '是', '在', '和', '有', '我', '他', '她', '它', '這', '那', '個', '了', '不', '人', '都', '說', '要', '去', '嗎'])
+        words = text.split()
+        stopword_count = len([word for word in words if word in stopwords])
+        punctuation_count = len(re.findall(r'[^\w\s]', text))
+        
+        # 特殊字元計數 (例如：@, #, $, %, ^, &, *)
+        special_char_count = len(re.findall(r'[@#$%^&*]', text))
+        
+        # URL 計數
+        url_count = len(re.findall(r'http[s]?://\S+', text))
+        
+        # 程式碼區塊、數學公式和表格區塊計數
+        code_block_count = MetadataFeatures.count_code_blocks(text) + MetadataFeatures.count_math_blocks(text) + MetadataFeatures.count_table_blocks(text)
+        
+        # 返回所有特徵的字典
+        return {
+            'char_count': char_count,
+            'word_count': word_count,
+            'sentence_count': sentence_count,
+            'avg_word_length': avg_word_length,
+            'unique_word_ratio': unique_word_ratio,
+            'stopword_count': stopword_count,
+            'punctuation_count': punctuation_count,
+            'special_char_count': special_char_count,
+            'code_block_count': code_block_count,
+            'url_count': url_count
+        }
+
+    @staticmethod
+    def get_feature_columns(feature_type: str = 'core') -> list:
+        """Returns the list of metadata feature column names."""
+        # 定義核心特徵列表，這與 extract_core_features 中實際計算的特徵一致
+        core_features = ['jaccard_index', 'ttr_diff', 'content_blocks_diff', 'length_diff']
+
+        # 根據 `extract_all_features` 當前的實現，'all' 和 'core' 返回相同的特徵。
+        # 因此，我們統一返回 core_features 列表以確保一致性。
+        if feature_type == 'core':
+            return core_features
+        elif feature_type == 'all':
+            # `extract_all_features` 目前直接調用 `extract_core_features`，
+            # 所以 'all' 類型也應該返回相同的特徵列表。
+            return core_features
+        else:
+            return []
+
+    @staticmethod
+    def add_metadata_features(row, feature_type: str = 'core') -> pd.Series:
+        """Calculates metadata features for a single row (prompt, response_a, response_b)."""
+        response_a = str(row.get('response_a', ''))
+        response_b = str(row.get('response_b', ''))
+        
+        # 根據 feature_type 決定計算哪些特徵
+        if feature_type == 'core':
+            features = {
+                'jaccard_index': MetadataFeatures.calculate_jaccard_similarity(response_a, response_b),
+                'ttr_diff': MetadataFeatures.calculate_ttr_diff(response_a, response_b),
+                'content_blocks_diff': MetadataFeatures.calculate_content_blocks_diff(response_a, response_b),
+                'length_diff': MetadataFeatures.calculate_length_diff(response_a, response_b)
+            }
+        else: # 'all'
+            features = MetadataFeatures._calculate_features(response_a)
+            features_b = MetadataFeatures._calculate_features(response_b)
+            features = {**features, **features_b}  # 合併兩個字典
+        
+        # 將特徵值轉換為浮點數，並處理無窮大和 NaN 值
+        for key in features.keys():
+            if np.isinf(features[key]):
+                features[key] = 10.0
+            elif np.isnan(features[key]):
+                features[key] = 0.0
+            else:
+                features[key] = float(features[key])
+        
+        return pd.Series(features)
 

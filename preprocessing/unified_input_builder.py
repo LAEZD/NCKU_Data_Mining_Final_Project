@@ -28,6 +28,7 @@ except Exception as e: # Catch other potential errors during NLTK setup
     print(f"WARNING: Could not verify/download NLTK punkt. FastLexRank might fail. Error: {e}")
 
 # --- Preprocessing Configuration Switches ---
+# (所有 default 參數已移除，統一由 fine_tuning.py 控制)
 # Centralized place to adjust preprocessing behavior defaults.
 # Modules like fine_tuning.py can import these to ensure consistency,
 # or they can be overridden by function parameters where applicable.
@@ -36,7 +37,7 @@ except Exception as e: # Catch other potential errors during NLTK setup
 # These are used as default values for the corresponding parameters in create_unified_input.
 CREATE_UNIFIED_INPUT_USE_FASTLEXRANK_DEFAULT = False
 CREATE_UNIFIED_INPUT_FASTLEXRANK_LOWER_BOUND_DEFAULT = 1
-INCLUDE_PROMPT_DEFAULT = False
+INCLUDE_PROMPT_DEFAULT = True
 # NEW: Defaults for response FastLexRank
 CREATE_UNIFIED_INPUT_USE_FASTLEXRANK_FOR_RESPONSE_DEFAULT = False
 CREATE_UNIFIED_INPUT_FASTLEXRANK_RESPONSE_LOWER_BOUND_DEFAULT = 10
@@ -185,15 +186,13 @@ class UnifiedInputBuilder:
         response_b: str,
         metadata_dict: Dict[str, Union[float, int]] = None,
         max_len: int = 512,
-        include_prompt: bool =INCLUDE_PROMPT_DEFAULT,
-        use_fastlexrank_for_question: bool = CREATE_UNIFIED_INPUT_USE_FASTLEXRANK_DEFAULT,
-        fastlexrank_question_token_lower_bound: int = CREATE_UNIFIED_INPUT_FASTLEXRANK_LOWER_BOUND_DEFAULT,
-        use_fastlexrank_for_response: bool = CREATE_UNIFIED_INPUT_USE_FASTLEXRANK_FOR_RESPONSE_DEFAULT,
-        fastlexrank_response_token_lower_bound: int = CREATE_UNIFIED_INPUT_FASTLEXRANK_RESPONSE_LOWER_BOUND_DEFAULT,
-        # RENAMED parameter to control content cleaning for both prompt and responses
-        apply_content_cleaning: bool = APPLY_CONTENT_CLEANING_DEFAULT,
-        # NEW: Parameter for fixed input format
-        use_fixed_format: bool = USE_FIXED_FORMAT_DEFAULT
+        include_prompt: bool = None,
+        use_fastlexrank_for_question: bool = None,
+        fastlexrank_question_token_lower_bound: int = None,
+        use_fastlexrank_for_response: bool = None,
+        fastlexrank_response_token_lower_bound: int = None,
+        apply_content_cleaning: bool = None,
+        use_fixed_format: bool = None
     ) -> Dict[str, torch.Tensor]:
         """
         統一的輸入構建函數 - 將元數據、prompt 和 responses 整合為模型輸入

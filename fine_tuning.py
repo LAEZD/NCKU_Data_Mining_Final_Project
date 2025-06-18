@@ -107,9 +107,18 @@ class Config:
             # Ensure local output directories exist
             os.makedirs(self.OUTPUT_DIR, exist_ok=True)
             os.makedirs(self.LOGGING_DIR, exist_ok=True)
-            
+              # --- Unified/Dual 資料清洗與 LexRank 控制參數 ---
+        self.APPLY_CONTENT_CLEANING = True
+        self.REMOVE_SPECIAL_BLOCKS = True
+        self.INCLUDE_PROMPT = True
+        self.USE_FASTLEXRANK_FOR_QUESTION = False
+        self.FASTLEXRANK_QUESTION_TOKEN_LOWER_BOUND = 1
+        self.USE_FASTLEXRANK_FOR_RESPONSE = False
+        self.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND = 10
+        self.USE_FIXED_FORMAT = True
+        
         # --- Device Configuration ---
-        self.DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'c模式u')
         print(f"INFO: Using device: {self.DEVICE}")
 
 # --------------------------------------------------------------------------
@@ -160,9 +169,20 @@ class PipelineModules:
 
                 # 👇🔨 加入分流邏輯
                 if config.MODEL_ARCH == 'dual':
-                    # tokenizer 共用，model 換成我們的 Dual-Encoder
-                    model = DualTowerPairClassifier(base_model=model_path)
-                else:                       # 'cross'
+                    # --- 雙塔模型 ---
+                    from preprocessing.metadata_features import MetadataFeatures
+                    metadata_feature_size = 0
+                    if config.EXTRACT_METADATA:
+                        # 動態計算 metadata 特徵數量
+                        metadata_feature_size = len(MetadataFeatures.get_feature_columns(config.METADATA_TYPE))
+                        print(f"  - Dual-Tower will use {metadata_feature_size} metadata features.")
+
+                    model = DualTowerPairClassifier(
+                        base_model=model_path,
+                        metadata_feature_size=metadata_feature_size # 傳入特徵數量
+                    )
+                else:
+                    # --- 交叉編碼器模型 ---
                     model = AutoModelForSequenceClassification.from_pretrained(
                         model_path, num_labels=3
                     )
@@ -182,26 +202,51 @@ class PipelineModules:
     @staticmethod
     def create_datasets(df, tokenizer, config: Config):
         print("\n[Module 3/5] Creating datasets...")
-        
         if config.MODEL_ARCH == 'dual':
             from sklearn.model_selection import train_test_split
             from sklearn.utils.class_weight import compute_class_weight
-            
+            from preprocessing.metadata_features import MetadataFeatures
+
             train_df, val_df = train_test_split(
                 df, test_size=config.VALIDATION_SIZE,
                 random_state=config.RANDOM_STATE,
                 stratify=df['label']
             )
-            train_dataset = DualTowerPairDataset(train_df, tokenizer, max_len=512)
-            val_dataset   = DualTowerPairDataset(val_df,   tokenizer, max_len=512)
 
+            # 如果啟用，為訓練集和驗證集添加 metadata
+            if config.EXTRACT_METADATA:
+                print("  - Adding metadata features for Dual-Tower model...")
+                train_df = MetadataFeatures.add_metadata_features_to_dataframe(train_df, config.METADATA_TYPE)
+                val_df = MetadataFeatures.add_metadata_features_to_dataframe(val_df, config.METADATA_TYPE)
+
+            train_dataset = DualTowerPairDataset(
+                train_df, tokenizer, max_len=512, # 根據新設計調整 max_len
+                apply_content_cleaning=config.APPLY_CONTENT_CLEANING,
+                include_metadata=config.EXTRACT_METADATA,
+                metadata_type=config.METADATA_TYPE,
+                include_prompt=config.INCLUDE_PROMPT,
+                use_lexrank_q=config.USE_FASTLEXRANK_FOR_QUESTION,
+                lexrank_q_lower_bound=config.FASTLEXRANK_QUESTION_TOKEN_LOWER_BOUND,
+                use_lexrank_r=config.USE_FASTLEXRANK_FOR_RESPONSE,
+                lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND
+            )
+            val_dataset = DualTowerPairDataset(
+                val_df, tokenizer, max_len=512, # 根據新設計調整 max_len
+                apply_content_cleaning=config.APPLY_CONTENT_CLEANING,
+                include_metadata=config.EXTRACT_METADATA,
+                metadata_type=config.METADATA_TYPE,
+                include_prompt=config.INCLUDE_PROMPT,
+                use_lexrank_q=config.USE_FASTLEXRANK_FOR_QUESTION,
+                lexrank_q_lower_bound=config.FASTLEXRANK_QUESTION_TOKEN_LOWER_BOUND,
+                use_lexrank_r=config.USE_FASTLEXRANK_FOR_RESPONSE,
+                lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND
+            )
             class_weights = compute_class_weight(
                 'balanced',
                 classes=np.unique(train_df['label']),
                 y=train_df['label']
             )
             class_weights_dict = {i: w for i, w in enumerate(class_weights)}
-            # val_labels / indices 給 downstream 評估用
             val_labels  = val_df['label'].tolist()
             val_indices = val_df.index.tolist()
             return train_dataset, val_dataset, val_labels, val_indices, class_weights_dict
@@ -288,28 +333,51 @@ class PipelineModules:
         
         if df_test is None:
             if not os.path.exists(config.TEST_PATH):
-                print("  - Test file not found, skipping inference.")                # For Kaggle code competitions, an empty test set in the first stage might require a dummy submission.
+                print("  - Test file not found, skipping inference.")
                 if config.IS_KAGGLE:
                      pd.DataFrame({'id': [], 'winner_model_a': [], 'winner_model_b': [], 'winner_tie': []}).to_csv(config.SUBMISSION_PATH, index=False)
                      print("  - Empty submission.csv created for Kaggle environment.")                
                      return
 
         def process_test_batch(test_df_chunk, tokenizer):
-            """Processes a single batch of test data using enhanced preprocessing."""
-            # 為批次數據提取元數據特徵
-            if config.EXTRACT_METADATA:
-                from preprocessing.metadata_features import MetadataFeatures
-                test_df_chunk = MetadataFeatures.add_metadata_features_to_dataframe(
-                    test_df_chunk, feature_type=config.METADATA_TYPE
+            """Processes a single batch of test data using the appropriate dataset for the model architecture."""
+            from preprocessing.metadata_features import MetadataFeatures
+
+            # 根據模型架構選擇正確的 Dataset
+            if config.MODEL_ARCH == 'dual':
+                # 如果啟用，為測試集添加 metadata
+                if config.EXTRACT_METADATA:
+                    test_df_chunk = MetadataFeatures.add_metadata_features_to_dataframe(
+                        test_df_chunk, feature_type=config.METADATA_TYPE
+                    )
+                # 雙塔模型需要 Prompt, A, B 分開
+                test_dataset = DualTowerPairDataset(
+                    dataframe=test_df_chunk,
+                    tokenizer=tokenizer,
+                    max_len=512, # 應與訓練時一致
+                    apply_content_cleaning=config.APPLY_CONTENT_CLEANING,
+                    include_metadata=config.EXTRACT_METADATA, # 傳遞開關
+                    metadata_type=config.METADATA_TYPE,      # 傳遞類型
+                    include_prompt=config.INCLUDE_PROMPT,
+                    use_lexrank_q=config.USE_FASTLEXRANK_FOR_QUESTION,
+                    lexrank_q_lower_bound=config.FASTLEXRANK_QUESTION_TOKEN_LOWER_BOUND,
+                    use_lexrank_r=config.USE_FASTLEXRANK_FOR_RESPONSE,
+                    lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND
+                )
+            else:
+                # Cross-encoder 模型使用統一輸入
+                if config.EXTRACT_METADATA:
+                    from preprocessing.metadata_features import MetadataFeatures
+                    test_df_chunk = MetadataFeatures.add_metadata_features_to_dataframe(
+                        test_df_chunk, feature_type=config.METADATA_TYPE
+                    )
+                test_dataset = EnhancedTestDataset(
+                    dataframe=test_df_chunk,
+                    tokenizer=tokenizer,
+                    include_metadata=config.EXTRACT_METADATA,
+                    metadata_type=config.METADATA_TYPE
                 )
             
-            # 使用 EnhancedTestDataset 確保測試階段也使用統一輸入構建策略
-            test_dataset = EnhancedTestDataset(
-                dataframe=test_df_chunk,
-                tokenizer=tokenizer,
-                include_metadata=config.EXTRACT_METADATA,
-                metadata_type=config.METADATA_TYPE
-            )
             preds = trainer.predict(test_dataset)
             probs = torch.nn.functional.softmax(torch.from_numpy(preds.predictions), dim=-1).numpy()
             return probs
