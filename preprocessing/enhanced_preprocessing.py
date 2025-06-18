@@ -275,7 +275,7 @@ class EnhancedPipelineModules:
         print("  - Step 1: Creating validation set with fixed number per class...")
         
         # 每個類別固定使用的驗證樣本數
-        FIXED_VAL_SAMPLES_PER_CLASS = 2000  # 每個類別固定200個樣本
+        FIXED_VAL_SAMPLES_PER_CLASS = 200  # 每個類別固定200個樣本
         
         # 獲取類別分布
         class_counts = df['label'].value_counts().sort_index()
