@@ -65,6 +65,7 @@ class Config:
         self.LABEL_SMOOTHING = 0.146398788362281
         self.VALIDATION_SIZE = 0.15
         self.MODEL_ARCH = 'dual'   # 'cross' 或 'dual'
+        self.LR_SCHEDULER_TYPE = "cosine"             # "linear" | "cosine" | "cosine_with_restarts"
 
         self.GLOBAL_BEST_DIR   = "./global_best_model"
         self.GLOBAL_METRIC_JSON = "./global_best_model/metrics.json"
