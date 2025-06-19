@@ -26,7 +26,7 @@ DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ────────── 載入 tokenizer / Dual-Encoder (一次) ──────────
 tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_DIR)
 
-model = DualTowerPairClassifier(base_model="distilbert-base-uncased")   # 先別 .to()
+model = DualTowerPairClassifier(base_model="distilbert-base-uncased", include_prompt=True)   # 若需關閉prompt請改為False
 state = load_file(WEIGHT_FILE, device="cpu")     # ← 固定載到 CPU
 model.load_state_dict(state, strict=False)
 model.to(DEVICE)                                # 再搬去 GPU/CPU 執行裝置

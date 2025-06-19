@@ -199,45 +199,37 @@ class MetadataFeatures:
     @staticmethod
     def extract_core_features(row: pd.Series) -> Dict[str, float]:
         """
-        提取四個核心元數據特徵
-        
-        Args:
-            row (pd.Series): 包含 prompt, response_a, response_b 的數據行
-            
-        Returns:
-            Dict[str, float]: 包含四個核心特徵的字典
+        提取五個核心元數據特徵（含 ttr_ratio）
         """
         response_a_raw = str(row.get('response_a', ''))
         response_b_raw = str(row.get('response_b', ''))
 
-        # 根據開關決定是否預處理文本 (僅用於 Jaccard 和 TTR)
+        # 處理過的文本（for jaccard, ttr, ttr_ratio）
         response_a_for_jaccard_ttr = MetadataFeatures.remove_special_content(response_a_raw)
         response_b_for_jaccard_ttr = MetadataFeatures.remove_special_content(response_b_raw)
 
-        # 計算原始差異值
+        # TTR
+        ttr_a = MetadataFeatures.calculate_ttr(response_a_for_jaccard_ttr)
+        ttr_b = MetadataFeatures.calculate_ttr(response_b_for_jaccard_ttr)
+        ttr_diff = ttr_a - ttr_b
+        ttr_ratio = ttr_a / (ttr_b + 1e-8) if ttr_b > 0 else 0.0
+
+        # 原始差異值
         length_diff = MetadataFeatures.calculate_length_diff(response_a_raw, response_b_raw)
         content_blocks_diff = MetadataFeatures.calculate_content_blocks_diff(response_a_raw, response_b_raw)
 
-        # 使用對數變換來縮放特徵，同時保留正負號
+        # 對數縮放
         scaled_length_diff = np.sign(length_diff) * np.log1p(abs(length_diff))
         scaled_content_blocks_diff = np.sign(content_blocks_diff) * np.log1p(abs(content_blocks_diff))
 
         core_features = {
-            # Jaccard 和 TTR 使用可能被處理過的文本
             'jaccard_index': MetadataFeatures.calculate_jaccard_similarity(
-                                response_a_for_jaccard_ttr, 
-                                response_b_for_jaccard_ttr
-                             ),
-            'ttr_diff': MetadataFeatures.calculate_ttr_diff(
-                                response_a_for_jaccard_ttr, 
-                                response_b_for_jaccard_ttr
-                        ),
-            
-            # Content blocks diff 和 Length diff 使用縮放後的值
+                response_a_for_jaccard_ttr, response_b_for_jaccard_ttr),
+            'ttr_diff': ttr_diff,
+            'ttr_ratio': ttr_ratio,
             'content_blocks_diff': scaled_content_blocks_diff,
             'length_diff': scaled_length_diff
         }
-        
         return core_features
     
     @staticmethod
@@ -303,7 +295,7 @@ class MetadataFeatures:
                 
                 # 進行更可靠的驗證：檢查快取中的欄位是否都是預期的特徵欄位
                 # 假設核心特徵是固定的
-                expected_core_features = ['jaccard_index','ttr_diff', 'content_blocks_diff', 'length_diff']
+                expected_core_features = ['jaccard_index','ttr_diff', 'ttr_ratio', 'content_blocks_diff', 'length_diff']
                 # 'all' features 目前與 core 相同，如果將來不同，這裡需要調整
                 expected_features_set = set(expected_core_features) 
 
@@ -409,7 +401,7 @@ class MetadataFeatures:
             List[float]: 特徵向量
         """
         if feature_order is None:
-            feature_order = ['jaccard_index', 'ttr_diff', 'content_blocks_diff', 'length_diff'] # Adjusted order for clarity
+            feature_order = ['jaccard_index', 'ttr_diff', 'ttr_ratio', 'content_blocks_diff', 'length_diff'] # Adjusted order for clarity
         
         feature_vector = []
         for feature_name in feature_order:
@@ -479,16 +471,11 @@ class MetadataFeatures:
     @staticmethod
     def get_feature_columns(feature_type: str = 'core') -> list:
         """Returns the list of metadata feature column names."""
-        # 定義核心特徵列表，這與 extract_core_features 中實際計算的特徵一致
-        core_features = ['jaccard_index', 'ttr_diff', 'content_blocks_diff', 'length_diff']
-
-        # 根據 `extract_all_features` 當前的實現，'all' 和 'core' 返回相同的特徵。
-        # 因此，我們統一返回 core_features 列表以確保一致性。
+        # 新增 ttr_ratio
+        core_features = ['jaccard_index', 'ttr_diff', 'ttr_ratio', 'content_blocks_diff', 'length_diff']
         if feature_type == 'core':
             return core_features
         elif feature_type == 'all':
-            # `extract_all_features` 目前直接調用 `extract_core_features`，
-            # 所以 'all' 類型也應該返回相同的特徵列表。
             return core_features
         else:
             return []
@@ -501,9 +488,14 @@ class MetadataFeatures:
         
         # 根據 feature_type 決定計算哪些特徵
         if feature_type == 'core':
+            # 新增 ttr_ratio 計算
+            ttr_a = MetadataFeatures.calculate_ttr(response_a)
+            ttr_b = MetadataFeatures.calculate_ttr(response_b)
+            ttr_ratio = ttr_a / (ttr_b + 1e-8) if ttr_b > 0 else 0.0
             features = {
                 'jaccard_index': MetadataFeatures.calculate_jaccard_similarity(response_a, response_b),
                 'ttr_diff': MetadataFeatures.calculate_ttr_diff(response_a, response_b),
+                'ttr_ratio': ttr_ratio,
                 'content_blocks_diff': MetadataFeatures.calculate_content_blocks_diff(response_a, response_b),
                 'length_diff': MetadataFeatures.calculate_length_diff(response_a, response_b)
             }
@@ -522,4 +514,27 @@ class MetadataFeatures:
                 features[key] = float(features[key])
         
         return pd.Series(features)
+
+    @staticmethod
+    def process_metadata_features(df: pd.DataFrame, feature_cols: list) -> pd.DataFrame:
+        """
+        根據特徵類型自動進行 log1p 與標準化（StandardScaler）。
+        - len_a, len_b, content_blocks_diff, ttr_diff, ttr_ratio, a_total_special_formats, b_total_special_formats 進行 log1p
+        - 其餘直接標準化
+        """
+        from sklearn.preprocessing import StandardScaler
+        df = df.copy()
+        # 需 log1p 的欄位
+        log1p_cols = []
+        for col in feature_cols:
+            if col in ['length_diff', 'content_blocks_diff', 'ttr_diff', 'ttr_ratio', 'a_total_special_formats', 'b_total_special_formats', 'len_a', 'len_b']:
+                log1p_cols.append(col)
+        # 先做 log1p
+        for col in log1p_cols:
+            if col in df.columns:
+                df[col] = np.log1p(np.abs(df[col])) * np.sign(df[col])
+        # 全部標準化
+        scaler = StandardScaler()
+        df[feature_cols] = scaler.fit_transform(df[feature_cols])
+        return df
 

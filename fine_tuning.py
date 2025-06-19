@@ -50,6 +50,7 @@ class Config:
         self.APPLY_AUGMENTATION = False   # Enable data augmentation 
         self.EXTRACT_METADATA = True   # Enable metadata feature extraction
         self.METADATA_TYPE = 'core'    # 'core' or 'all'
+        self.METADATA_FUSION = 'dual_path'  # 'concat'、'dual_path'、'residual_inject'
         
         # --- Training Hyperparameters ---
         self.EPOCHS = 4
@@ -179,7 +180,9 @@ class PipelineModules:
 
                     model = DualTowerPairClassifier(
                         base_model=model_path,
-                        metadata_feature_size=metadata_feature_size # 傳入特徵數量
+                        metadata_feature_size=metadata_feature_size, # 傳入特徵數量
+                        include_prompt=config.INCLUDE_PROMPT, # <--- 修正: 傳遞 include_prompt
+                        metadata_fusion=config.METADATA_FUSION  # <--- 修正：加上這一行
                     )
                 else:
                     # --- 交叉編碼器模型 ---
@@ -218,7 +221,11 @@ class PipelineModules:
                 print("  - Adding metadata features for Dual-Tower model...")
                 train_df = MetadataFeatures.add_metadata_features_to_dataframe(train_df, config.METADATA_TYPE)
                 val_df = MetadataFeatures.add_metadata_features_to_dataframe(val_df, config.METADATA_TYPE)
-
+                # 取得特徵欄位
+                feature_cols = MetadataFeatures.get_feature_columns(config.METADATA_TYPE)
+                # 對 metadata 特徵進行 log1p+標準化
+                train_df = MetadataFeatures.process_metadata_features(train_df, feature_cols)
+                val_df = MetadataFeatures.process_metadata_features(val_df, feature_cols)
             train_dataset = DualTowerPairDataset(
                 train_df, tokenizer, max_len=512, # 根據新設計調整 max_len
                 apply_content_cleaning=config.APPLY_CONTENT_CLEANING,
@@ -321,7 +328,7 @@ class PipelineModules:
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
             compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)])
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=5)])
         
         print("  - Trainer setup complete.")
         return trainer

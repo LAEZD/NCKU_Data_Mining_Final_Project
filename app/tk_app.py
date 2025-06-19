@@ -15,7 +15,7 @@ TOKENIZERDIR = ROOT                            # tokenizer.json / vocab.txt / co
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 tokenizer = AutoTokenizer.from_pretrained(TOKENIZERDIR)
-model     = DualTowerPairClassifier(base_model="distilbert-base-uncased").to(DEVICE)
+model     = DualTowerPairClassifier(base_model="distilbert-base-uncased", include_prompt=True).to(DEVICE)  # 若需關閉prompt請改為False
 state     = load_file(WEIGHT_FILE)
 model.load_state_dict(state, strict=False)
 model.eval()
