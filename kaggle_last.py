@@ -1174,18 +1174,21 @@ class KaggleTestDataset(Dataset):
         row = self.df.iloc[idx]
         metadata = self.features.iloc[idx]
         
+        # 先做 z-score 標準化（依照 SimpleMetadataFeatures.FEATURE_STATS）
+        metadata_std = SimpleMetadataFeatures.standardize_features(metadata)
+        
         # 生成與訓練相同順序的特徵向量
         if MetadataFeatures is not None:
             feature_order = MetadataFeatures.get_feature_columns('core')
-            metadata_values = MetadataFeatures.create_feature_vector(metadata, feature_order)
+            metadata_values = [float(metadata_std[col]) for col in feature_order]
         else:
-            # Fallback: 使用內建實現 (順序已在註解中說明)
+            # Fallback: 使用固定順序
             metadata_values = [
-                float(metadata['jaccard_index']),
-                float(metadata['ttr_diff']),
-                float(metadata['ttr_ratio']),
-                float(metadata['content_blocks_diff']),
-                float(metadata['length_diff'])
+                float(metadata_std['jaccard_index']),
+                float(metadata_std['ttr_diff']),
+                float(metadata_std['ttr_ratio']),
+                float(metadata_std['content_blocks_diff']),
+                float(metadata_std['length_diff'])
             ]
         metadata_tensor = torch.tensor(metadata_values, dtype=torch.float32)
         

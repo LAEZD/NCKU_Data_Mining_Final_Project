@@ -26,7 +26,9 @@ class DualTowerPairDataset(Dataset):
                  use_lexrank_q: bool = False,
                  lexrank_q_lower_bound: int = 1,
                  use_lexrank_r: bool = False,
-                 lexrank_r_lower_bound: int = 10):
+                 lexrank_r_lower_bound: int = 10,
+                 standardize_metadata: bool = False,
+                 metadata_stats: dict = None):
         self.df = dataframe.reset_index(drop=True)
         self.tok = tokenizer
         self.max_len = max_len
@@ -40,6 +42,8 @@ class DualTowerPairDataset(Dataset):
         self.lexrank_q_lower_bound = lexrank_q_lower_bound
         self.use_lexrank_r = use_lexrank_r and FASTLEXRANK_AVAILABLE
         self.lexrank_r_lower_bound = lexrank_r_lower_bound
+        self.standardize_metadata = standardize_metadata
+        self.metadata_stats = metadata_stats or {}
 
         if self.include_metadata:
             self.metadata_cols = MetadataFeatures.get_feature_columns(self.metadata_type)
@@ -131,6 +135,14 @@ class DualTowerPairDataset(Dataset):
         # 4. (可選) 加入 Metadata
         if self.include_metadata:
             metadata_values = row[self.metadata_cols].values.astype(np.float32)
+            if self.standardize_metadata and self.metadata_stats:
+                standardized = []
+                for val, col in zip(metadata_values, self.metadata_cols):
+                    stats = self.metadata_stats.get(col, None)
+                    if stats and stats.get('std', 0) > 1e-8:
+                        val = (val - stats['mean']) / stats['std']
+                    standardized.append(val)
+                metadata_values = np.array(standardized, dtype=np.float32)
             sample["metadata_features"] = torch.tensor(metadata_values, dtype=torch.float)
 
         # 5. 加入標籤

@@ -220,6 +220,14 @@ class PipelineModules:
                 train_df = MetadataFeatures.add_metadata_features_to_dataframe(train_df, config.METADATA_TYPE)
                 val_df = MetadataFeatures.add_metadata_features_to_dataframe(val_df, config.METADATA_TYPE)
 
+                # --- 針對 train_df 計算 mean/std 供標準化 ---
+                meta_cols = MetadataFeatures.get_feature_columns(config.METADATA_TYPE)
+                config.METADATA_STATS = {col: {
+                    'mean': float(train_df[col].mean()),
+                    'std':  float(train_df[col].std()) if train_df[col].std() > 1e-8 else 1.0
+                } for col in meta_cols}
+                print("  - Metadata stats (for standardization) 計算完成")
+
             train_dataset = DualTowerPairDataset(
                 train_df, tokenizer, max_len=512, # 根據新設計調整 max_len
                 apply_content_cleaning=config.APPLY_CONTENT_CLEANING,
@@ -229,7 +237,9 @@ class PipelineModules:
                 use_lexrank_q=config.USE_FASTLEXRANK_FOR_QUESTION,
                 lexrank_q_lower_bound=config.FASTLEXRANK_QUESTION_TOKEN_LOWER_BOUND,
                 use_lexrank_r=config.USE_FASTLEXRANK_FOR_RESPONSE,
-                lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND
+                lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND,
+                standardize_metadata=True,
+                metadata_stats=getattr(config, 'METADATA_STATS', None)
             )
             val_dataset = DualTowerPairDataset(
                 val_df, tokenizer, max_len=512, # 根據新設計調整 max_len
@@ -240,7 +250,9 @@ class PipelineModules:
                 use_lexrank_q=config.USE_FASTLEXRANK_FOR_QUESTION,
                 lexrank_q_lower_bound=config.FASTLEXRANK_QUESTION_TOKEN_LOWER_BOUND,
                 use_lexrank_r=config.USE_FASTLEXRANK_FOR_RESPONSE,
-                lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND
+                lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND,
+                standardize_metadata=True,
+                metadata_stats=getattr(config, 'METADATA_STATS', None)
             )
             class_weights = compute_class_weight(
                 'balanced',
@@ -363,7 +375,9 @@ class PipelineModules:
                     use_lexrank_q=config.USE_FASTLEXRANK_FOR_QUESTION,
                     lexrank_q_lower_bound=config.FASTLEXRANK_QUESTION_TOKEN_LOWER_BOUND,
                     use_lexrank_r=config.USE_FASTLEXRANK_FOR_RESPONSE,
-                    lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND
+                    lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND,
+                    standardize_metadata=True,
+                    metadata_stats=getattr(config, 'METADATA_STATS', None)
                 )
             else:
                 # Cross-encoder 模型使用統一輸入
