@@ -199,13 +199,13 @@ class MetadataFeatures:
     @staticmethod
     def extract_core_features(row: pd.Series) -> Dict[str, float]:
         """
-        提取四個核心元數據特徵
+        提取五個核心元數據特徵（更新為5個特徵以匹配模型期望）
         
         Args:
             row (pd.Series): 包含 prompt, response_a, response_b 的數據行
             
         Returns:
-            Dict[str, float]: 包含四個核心特徵的字典
+            Dict[str, float]: 包含五個核心特徵的字典
         """
         response_a_raw = str(row.get('response_a', ''))
         response_b_raw = str(row.get('response_b', ''))
@@ -222,6 +222,13 @@ class MetadataFeatures:
         scaled_length_diff = np.sign(length_diff) * np.log1p(abs(length_diff))
         scaled_content_blocks_diff = np.sign(content_blocks_diff) * np.log1p(abs(content_blocks_diff))
 
+        # 計算TTR值
+        ttr_a = MetadataFeatures.calculate_ttr(response_a_for_jaccard_ttr)
+        ttr_b = MetadataFeatures.calculate_ttr(response_b_for_jaccard_ttr)
+        
+        # 計算TTR比值（新增的第5個特徵）
+        ttr_ratio = max(ttr_a, ttr_b) / max(min(ttr_a, ttr_b), 0.001) if min(ttr_a, ttr_b) > 0 else 1.0
+
         core_features = {
             # Jaccard 和 TTR 使用可能被處理過的文本
             'jaccard_index': MetadataFeatures.calculate_jaccard_similarity(
@@ -235,7 +242,10 @@ class MetadataFeatures:
             
             # Content blocks diff 和 Length diff 使用縮放後的值
             'content_blocks_diff': scaled_content_blocks_diff,
-            'length_diff': scaled_length_diff
+            'length_diff': scaled_length_diff,
+            
+            # 新增的第5個特徵：TTR比值
+            'ttr_ratio': ttr_ratio
         }
         
         return core_features
@@ -303,9 +313,9 @@ class MetadataFeatures:
                 
                 # 進行更可靠的驗證：檢查快取中的欄位是否都是預期的特徵欄位
                 # 假設核心特徵是固定的
-                expected_core_features = ['jaccard_index','ttr_diff', 'content_blocks_diff', 'length_diff']
+                expected_core_features = ['jaccard_index','ttr_diff', 'ttr_ratio', 'content_blocks_diff', 'length_diff']
                 # 'all' features 目前與 core 相同，如果將來不同，這裡需要調整
-                expected_features_set = set(expected_core_features) 
+                expected_features_set = set(expected_core_features)
 
                 if isinstance(cached_features_df, pd.DataFrame) and not cached_features_df.empty and set(cached_features_df.columns) == expected_features_set and len(cached_features_df) == len(df):
                     # 將快取的特徵 DataFrame 與原始 DataFrame (不包含已存在的特徵列，以防萬一) 合併
@@ -409,7 +419,7 @@ class MetadataFeatures:
             List[float]: 特徵向量
         """
         if feature_order is None:
-            feature_order = ['jaccard_index', 'ttr_diff', 'content_blocks_diff', 'length_diff'] # Adjusted order for clarity
+            feature_order = ['jaccard_index', 'ttr_diff', 'ttr_ratio', 'content_blocks_diff', 'length_diff'] # Adjusted order for clarity
         
         feature_vector = []
         for feature_name in feature_order:
@@ -479,8 +489,9 @@ class MetadataFeatures:
     @staticmethod
     def get_feature_columns(feature_type: str = 'core') -> list:
         """Returns the list of metadata feature column names."""
-        # 定義核心特徵列表，這與 extract_core_features 中實際計算的特徵一致
-        core_features = ['jaccard_index', 'ttr_diff', 'content_blocks_diff', 'length_diff']
+        # 定義核心特徵列表，這與 extract_core_features 中實際計算的特徵順序一致
+        # 順序必須與 extract_core_features 返回的字典鍵順序完全匹配
+        core_features = ['jaccard_index', 'ttr_diff', 'ttr_ratio', 'content_blocks_diff', 'length_diff']
 
         # 根據 `extract_all_features` 當前的實現，'all' 和 'core' 返回相同的特徵。
         # 因此，我們統一返回 core_features 列表以確保一致性。
@@ -499,27 +510,16 @@ class MetadataFeatures:
         response_a = str(row.get('response_a', ''))
         response_b = str(row.get('response_b', ''))
         
-        # 根據 feature_type 決定計算哪些特徵
-        if feature_type == 'core':
-            features = {
-                'jaccard_index': MetadataFeatures.calculate_jaccard_similarity(response_a, response_b),
-                'ttr_diff': MetadataFeatures.calculate_ttr_diff(response_a, response_b),
-                'content_blocks_diff': MetadataFeatures.calculate_content_blocks_diff(response_a, response_b),
-                'length_diff': MetadataFeatures.calculate_length_diff(response_a, response_b)
-            }
-        else: # 'all'
-            features = MetadataFeatures._calculate_features(response_a)
-            features_b = MetadataFeatures._calculate_features(response_b)
-            features = {**features, **features_b}  # 合併兩個字典
+        # 計算TTR比值
+        ttr_a = MetadataFeatures.calculate_ttr(MetadataFeatures.remove_special_content(response_a))
+        ttr_b = MetadataFeatures.calculate_ttr(MetadataFeatures.remove_special_content(response_b))
+        ttr_ratio = max(ttr_a, ttr_b) / max(min(ttr_a, ttr_b), 0.001) if min(ttr_a, ttr_b) > 0 else 1.0
         
-        # 將特徵值轉換為浮點數，並處理無窮大和 NaN 值
-        for key in features.keys():
-            if np.isinf(features[key]):
-                features[key] = 10.0
-            elif np.isnan(features[key]):
-                features[key] = 0.0
-            else:
-                features[key] = float(features[key])
-        
-        return pd.Series(features)
+        return pd.Series({
+            'jaccard_index': MetadataFeatures.calculate_jaccard_similarity(response_a, response_b),
+            'ttr_diff': MetadataFeatures.calculate_ttr_diff(response_a, response_b),
+            'content_blocks_diff': MetadataFeatures.calculate_content_blocks_diff(response_a, response_b),
+            'length_diff': MetadataFeatures.calculate_length_diff(response_a, response_b),
+            'ttr_ratio': ttr_ratio
+        })
 

@@ -26,6 +26,7 @@ from sklearn.metrics import accuracy_score, log_loss
 from dual_encoder import DualTowerPairClassifier
 from dual_dataset import DualTowerPairDataset
 import json, shutil, pathlib, datetime
+import re
 
 # Import enhanced preprocessing modules
 from preprocessing.enhanced_preprocessing import EnhancedPipelineModules, EnhancedTestDataset
@@ -44,7 +45,7 @@ class Config:
     def __init__(self):        # --- Basic Settings ---
         self.MODEL_NAME = 'distilbert-base-uncased'
         self.QUICK_TEST = False # Set to True for a quick run with a subset of data
-        self.QUICK_TEST_SIZE = 2000
+        self.QUICK_TEST_SIZE = 1000
         self.RANDOM_STATE = 42
           # --- Enhanced Features Settings ---
         self.APPLY_AUGMENTATION = False   # Enable data augmentation 
@@ -59,8 +60,8 @@ class Config:
         self.WEIGHT_DECAY = 0.07114476009343425
         self.WARMUP_RATIO = 0.06
         self.LOGGING_STEPS = 50
-        self.EVAL_STEPS = 600
-        self.SAVE_STEPS = 600
+        self.EVAL_STEPS = 300
+        self.SAVE_STEPS = 300
         self.SAVE_TOTAL_LIMIT = 2
         self.LABEL_SMOOTHING = 0.146398788362281
         self.VALIDATION_SIZE = 0.15
@@ -173,8 +174,8 @@ class PipelineModules:
                     from preprocessing.metadata_features import MetadataFeatures
                     metadata_feature_size = 0
                     if config.EXTRACT_METADATA:
-                        # 動態計算 metadata 特徵數量
-                        metadata_feature_size = len(MetadataFeatures.get_feature_columns(config.METADATA_TYPE))
+                        # 固定使用5個特徵 (jaccard_index, ttr_diff, content_blocks_diff, length_diff, ttr_ratio)
+                        metadata_feature_size = 5
                         print(f"  - Dual-Tower will use {metadata_feature_size} metadata features.")
 
                     model = DualTowerPairClassifier(
@@ -321,7 +322,7 @@ class PipelineModules:
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
             compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)])
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=10)])
         
         print("  - Trainer setup complete.")
         return trainer
@@ -433,12 +434,14 @@ class PipelineModules:
             dummy_sub = pd.DataFrame({"id": [0], "winner_model_a": [0.33], "winner_model_b": [0.33], "winner_tie": [0.34]})
             dummy_sub.to_csv(config.SUBMISSION_PATH, index=False)
 
-
+# --------------------------------------------------------------------------
+# 2. Simplified Model Saving with Proper Config Handling
+# --------------------------------------------------------------------------
 def maybe_save_global_best(val_loss, val_acc, trainer, tokenizer, config, extra_info=None):
     """
-    比較目前 val_loss 與歷史最佳；若更好就覆蓋 global_best_model/ 並寫 metrics.json
+    比較目前 val_loss 與歷史最佳；若更好就覆蓋 global_best_model/ 並保存完整配置
     """
-    best_dir  = pathlib.Path(config.GLOBAL_BEST_DIR)
+    best_dir = pathlib.Path(config.GLOBAL_BEST_DIR)
     best_json = best_dir / "metrics.json"
 
     # 讀取舊紀錄
@@ -452,34 +455,123 @@ def maybe_save_global_best(val_loss, val_acc, trainer, tokenizer, config, extra_
 
     if (old_loss is None) or (val_loss < old_loss - 1e-6):
         print(f"🎉  New global best!  LogLoss {val_loss:.6f}" + (f"  < {old_loss:.6f}" if old_loss else ""))
-        # 覆蓋模型目錄
+        
+        # 清理並創建目錄
         if best_dir.exists():
             shutil.rmtree(best_dir)
+        best_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 保存模型和tokenizer（這會自動保存原始的config.json）
+        print("  - 保存模型權重和配置...")
         trainer.save_model(best_dir)
         tokenizer.save_pretrained(best_dir)
-
-        # 存新指標
+        
+        # 手動保存我們自定義模型的config.json（如果不存在）
+        config_path = best_dir / "config.json"
+        if not config_path.exists() and hasattr(trainer.model, 'config'):
+            print("  - 手動保存自定義模型的config.json...")
+            import json
+            with open(config_path, 'w') as f:
+                json.dump(trainer.model.config.to_dict(), f, indent=2)
+            print(f"    💾 Config.json已保存: {config_path}")
+        
+        # 保存metadata統計參數（如果啟用）
+        metadata_stats = None
+        if config.EXTRACT_METADATA:
+            print("  - 計算並保存metadata統計參數 (train + val)...")
+            # 針對 train 與 val 兩個子集的 union 來計算，較能代表完整資料分布
+            train_ds = trainer.train_dataset if hasattr(trainer, 'train_dataset') else None
+            val_ds   = trainer.eval_dataset  if hasattr(trainer, 'eval_dataset')  else None
+            metadata_stats = save_training_metadata_stats(train_ds, val_ds, best_dir)
+        
+        # 保存訓練配置和指標
         metrics = {
-            "timestamp" : datetime.datetime.now().isoformat(timespec="seconds"),
-            "log_loss"  : float(val_loss),
-            "accuracy"  : float(val_acc),
+            "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+            "log_loss": float(val_loss),
+            "accuracy": float(val_acc),
             "model_arch": config.MODEL_ARCH,
             "hyperparams": {
-                "learning_rate" : config.LEARNING_RATE,
-                "weight_decay"  : config.WEIGHT_DECAY,
+                "learning_rate": config.LEARNING_RATE,
+                "weight_decay": config.WEIGHT_DECAY,
                 "label_smoothing": config.LABEL_SMOOTHING,
-                "epochs"        : config.EPOCHS,
-                "batch_size"    : config.TRAIN_BATCH_SIZE,
-                "max_len"       : 512 if config.MODEL_ARCH=="dual" else 512,
-                "warmup_ratio"  : getattr(config, "WARMUP_RATIO", None),
-                "lr_scheduler"  : trainer.args.lr_scheduler_type,
+                "epochs": config.EPOCHS,
+                "batch_size": config.TRAIN_BATCH_SIZE,
+                "max_len": 512,
+                "warmup_ratio": getattr(config, "WARMUP_RATIO", None),
+                "lr_scheduler": trainer.args.lr_scheduler_type,
+            },
+            "preprocessing_config": {
+                "extract_metadata": config.EXTRACT_METADATA,
+                "metadata_type": config.METADATA_TYPE if config.EXTRACT_METADATA else None,
+                "apply_content_cleaning": config.APPLY_CONTENT_CLEANING,
+                "remove_special_blocks": getattr(config, 'REMOVE_SPECIAL_BLOCKS', True),
+                "include_prompt": config.INCLUDE_PROMPT,
             }
         }
+        
         if extra_info:
             metrics.update(extra_info)
-        best_dir.mkdir(parents=True, exist_ok=True)
+        
+        if metadata_stats:
+            metrics["metadata_stats"] = metadata_stats
+        
+        # 保存metrics.json
         with open(best_json, "w") as f:
             json.dump(metrics, f, indent=2)
+        
+        # 驗證保存的文件
+        print(f"✅ 模型完整保存至: {best_dir}")
+        saved_files = sorted([f.name for f in best_dir.iterdir()])
+        print(f"📁 保存的文件: {', '.join(saved_files)}")
+        
+        # 檢查關鍵文件
+        required_files = ['config.json', 'model.safetensors']
+        if config.EXTRACT_METADATA:
+            required_files.append('metadata_stats.json')
+        
+        missing_files = [f for f in required_files if not (best_dir / f).exists()]
+        if missing_files:
+            print(f"⚠️  警告：缺少關鍵文件: {missing_files}")
+        else:
+            print(f"✅ 所有關鍵文件都已保存")
+
+def save_training_metadata_stats(train_dataset, val_dataset, save_dir):
+    """從 train+val 數據集中提取並保存 metadata 統計參數"""
+    # 收集可用的 DataFrame
+    frames = []
+    for ds in (train_dataset, val_dataset):
+        if ds is not None and hasattr(ds, 'df'):
+            frames.append(ds.df)
+    if not frames:
+        print("    ⚠️  無可用資料集，跳過 metadata 統計計算")
+        return None
+
+    df_all = pd.concat(frames, axis=0, ignore_index=True)
+
+    # 取得特徵欄位
+    metadata_cols = train_dataset.metadata_cols if train_dataset and hasattr(train_dataset, 'metadata_cols') else []
+    if not metadata_cols or not all(col in df_all.columns for col in metadata_cols):
+        print("    ⚠️  找不到完整的 metadata 特徵列，跳過統計保存")
+        return None
+
+    metadata_stats = {}
+    for col in metadata_cols:
+        metadata_stats[col] = {
+            'mean': float(df_all[col].mean()),
+            'std': float(df_all[col].std()),
+            'min': float(df_all[col].min()),
+            'max': float(df_all[col].max())
+        }
+
+    # 保存統計參數
+    stats_path = save_dir / 'metadata_stats.json'
+    with open(stats_path, 'w') as f:
+        json.dump(metadata_stats, f, indent=2)
+
+    print(f"    💾 Metadata統計參數已保存: {stats_path}")
+    print(f"    📊 保存的特徵: {list(metadata_stats.keys())}")
+
+    return metadata_stats
 
 # --------------------------------------------------------------------------
 # 3. Main Execution Flow

@@ -41,7 +41,7 @@ def objective(trial):
 
     #── Quick test (如需) ──
     cfg.QUICK_TEST = True
-    cfg.QUICK_TEST_SIZE = 5000
+    cfg.QUICK_TEST_SIZE = 15000
 
     #── 執行一次訓練 ──
     logloss, acc = fine_tuning.run_once_with_config(cfg)
