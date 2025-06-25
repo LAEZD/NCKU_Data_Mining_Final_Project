@@ -1,4 +1,5 @@
 # LLM 回應品質分類系統 - 雙塔架構 + 元數據特徵
+因爲paper的篇幅限制，所以我們在readme這裏寫下更詳細的説明，希望助教可以好好的看完，拜托。
 
 > **NCKU 資料探勘期末專案** - Kaggle「LLM Classification Fine-Tuning」競賽解決方案
 
