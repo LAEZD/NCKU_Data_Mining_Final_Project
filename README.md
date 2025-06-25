@@ -58,6 +58,9 @@ NCKU_Data_Mining_Final_Project/
 [下載連接](https://drive.google.com/file/d/1ksKbd604Zq1rWolFB5sZQg8oNpIgO0da/view?usp=sharing)
 下載後解壓縮，雙擊setup.bat檔
 
+
+[DEMO](DEMO.mkv)
+
 ### 2. 模型訓練
 ```bash
 python fine_tuning.py
