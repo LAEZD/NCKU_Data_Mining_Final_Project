@@ -57,10 +57,11 @@ NCKU_Data_Mining_Final_Project/
 
 ### 1. APP使用
 [下載連接](https://drive.google.com/file/d/1ksKbd604Zq1rWolFB5sZQg8oNpIgO0da/view?usp=sharing)
+
 下載後解壓縮，雙擊setup.bat檔
 
+https://github.com/user-attachments/assets/0382c252-1f53-4501-8aad-c0deaf99595c
 
-[DEMO](DEMO.mkv)
 
 ### 2. 模型訓練
 ```bash
