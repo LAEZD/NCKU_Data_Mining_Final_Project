@@ -153,7 +153,7 @@ def extract_core_features(row: pd.Series) -> Dict[str, float]:
 
 ## 開發團隊
 
-**NCKU 資料探勘課程** - Final Project Team
+**NCKU 資料探勘課程** - Final Project Team1
 
 ## 授權
 
@@ -169,7 +169,7 @@ def extract_core_features(row: pd.Series) -> Dict[str, float]:
 - **雙塔設計**：共享編碼器分別處理 Prompt、Response A、Response B
 - **特徵拼接**：[v_p, v_a, |v_p-v_a|, v_b, |v_p-v_b|] 形成 768×5=3840 維基礎特徵
 - **元數據融合**：5維手工特徵通過雙層MLP升維至768維，與基礎特徵拼接成4608維
-- **三分類器**：768→3的全連接層輸出 Model A勝/Model B勝/平手
+- **三分類器**：全連接層輸出 Model A勝/Model B勝/平手
 
 #### 模型選擇理由
 1. **計算效率**：相比交叉編碼器，雙塔架構支援獨立編碼與快取
@@ -222,6 +222,7 @@ def extract_core_features(row: pd.Series) -> Dict[str, float]:
 
 #### 基線比較
 **沒有標準基線**：由於任務新穎性，缺乏公認的state-of-the-art方法
+
 **內部比較**：
 - 純DistilBERT交叉編碼器：Log Loss ≈ 1.05
 - 雙塔無元數據：Log Loss ≈ 1.03
