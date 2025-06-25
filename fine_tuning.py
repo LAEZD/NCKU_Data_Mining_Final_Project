@@ -23,6 +23,10 @@ from transformers import (
     EarlyStoppingCallback
 )
 from sklearn.metrics import accuracy_score, log_loss
+from dual_encoder import DualTowerPairClassifier
+from dual_dataset import DualTowerPairDataset
+import json, shutil, pathlib, datetime
+import re
 
 # Import enhanced preprocessing modules
 from preprocessing.enhanced_preprocessing import EnhancedPipelineModules, EnhancedTestDataset
@@ -41,7 +45,7 @@ class Config:
     def __init__(self):        # --- Basic Settings ---
         self.MODEL_NAME = 'distilbert-base-uncased'
         self.QUICK_TEST = False # Set to True for a quick run with a subset of data
-        self.QUICK_TEST_SIZE = 2000
+        self.QUICK_TEST_SIZE = 1000
         self.RANDOM_STATE = 42
           # --- Enhanced Features Settings ---
         self.APPLY_AUGMENTATION = False   # Enable data augmentation 
@@ -50,17 +54,22 @@ class Config:
         
         # --- Training Hyperparameters ---
         self.EPOCHS = 4
-        self.LEARNING_RATE = 1e-5
+        self.LEARNING_RATE = 1.329291894316217e-05
         self.TRAIN_BATCH_SIZE = 8
         self.EVAL_BATCH_SIZE = 8
-        self.WEIGHT_DECAY = 0.03
-        self.WARMUP_STEPS = 600
+        self.WEIGHT_DECAY = 0.07114476009343425
+        self.WARMUP_RATIO = 0.06
         self.LOGGING_STEPS = 50
-        self.EVAL_STEPS = 600
-        self.SAVE_STEPS = 600
+        self.EVAL_STEPS = 300
+        self.SAVE_STEPS = 300
         self.SAVE_TOTAL_LIMIT = 2
-        self.LABEL_SMOOTHING = 0.1
+        self.LABEL_SMOOTHING = 0.146398788362281
         self.VALIDATION_SIZE = 0.15
+        self.MODEL_ARCH = 'dual'   # 'cross' 或 'dual'
+        self.LR_SCHEDULER_TYPE = "cosine"             # "linear" | "cosine" | "cosine_with_restarts"
+
+        self.GLOBAL_BEST_DIR   = "./global_best_model"
+        self.GLOBAL_METRIC_JSON = "./global_best_model/metrics.json"
 
         # --- Environment Detection and Path Configuration ---
         self.IS_KAGGLE = os.path.exists('/kaggle/input')
@@ -99,9 +108,18 @@ class Config:
             # Ensure local output directories exist
             os.makedirs(self.OUTPUT_DIR, exist_ok=True)
             os.makedirs(self.LOGGING_DIR, exist_ok=True)
-            
+              # --- Unified/Dual 資料清洗與 LexRank 控制參數 ---
+        self.APPLY_CONTENT_CLEANING = True
+        self.REMOVE_SPECIAL_BLOCKS = True
+        self.INCLUDE_PROMPT = True
+        self.USE_FASTLEXRANK_FOR_QUESTION = False
+        self.FASTLEXRANK_QUESTION_TOKEN_LOWER_BOUND = 1
+        self.USE_FASTLEXRANK_FOR_RESPONSE = False
+        self.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND = 10
+        self.USE_FIXED_FORMAT = True
+        
         # --- Device Configuration ---
-        self.DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'c模式u')
         print(f"INFO: Using device: {self.DEVICE}")
 
 # --------------------------------------------------------------------------
@@ -149,9 +167,26 @@ class PipelineModules:
                 model_path = config.MODEL_NAME
                 print(f"  - Loading model and tokenizer from Hugging Face: {model_path}")
                 tokenizer = AutoTokenizer.from_pretrained(model_path)
-                model = AutoModelForSequenceClassification.from_pretrained(
-                    model_path, num_labels=3
-                )
+
+                # 👇🔨 加入分流邏輯
+                if config.MODEL_ARCH == 'dual':
+                    # --- 雙塔模型 ---
+                    from preprocessing.metadata_features import MetadataFeatures
+                    metadata_feature_size = 0
+                    if config.EXTRACT_METADATA:
+                        # 固定使用5個特徵 (jaccard_index, ttr_diff, content_blocks_diff, length_diff, ttr_ratio)
+                        metadata_feature_size = 5
+                        print(f"  - Dual-Tower will use {metadata_feature_size} metadata features.")
+
+                    model = DualTowerPairClassifier(
+                        base_model=model_path,
+                        metadata_feature_size=metadata_feature_size # 傳入特徵數量
+                    )
+                else:
+                    # --- 交叉編碼器模型 ---
+                    model = AutoModelForSequenceClassification.from_pretrained(
+                        model_path, num_labels=3
+                    )
             
             # Add padding token if it doesn't exist
             if tokenizer.pad_token is None:
@@ -167,16 +202,77 @@ class PipelineModules:
     
     @staticmethod
     def create_datasets(df, tokenizer, config: Config):
-        """Creates enhanced training and validation datasets."""
-        print("\n[Module 3/5] Creating enhanced datasets...")
-        
-        # Delegate to enhanced preprocessing
-        return EnhancedPipelineModules.create_enhanced_datasets(df, tokenizer, config)
+        print("\n[Module 3/5] Creating datasets...")
+        if config.MODEL_ARCH == 'dual':
+            from sklearn.model_selection import train_test_split
+            from sklearn.utils.class_weight import compute_class_weight
+            from preprocessing.metadata_features import MetadataFeatures
 
+            train_df, val_df = train_test_split(
+                df, test_size=config.VALIDATION_SIZE,
+                random_state=config.RANDOM_STATE,
+                stratify=df['label']
+            )
+
+            # 如果啟用，為訓練集和驗證集添加 metadata
+            if config.EXTRACT_METADATA:
+                print("  - Adding metadata features for Dual-Tower model...")
+                train_df = MetadataFeatures.add_metadata_features_to_dataframe(train_df, config.METADATA_TYPE)
+                val_df = MetadataFeatures.add_metadata_features_to_dataframe(val_df, config.METADATA_TYPE)
+
+                # --- 針對 train_df 計算 mean/std 供標準化 ---
+                meta_cols = MetadataFeatures.get_feature_columns(config.METADATA_TYPE)
+                config.METADATA_STATS = {col: {
+                    'mean': float(train_df[col].mean()),
+                    'std':  float(train_df[col].std()) if train_df[col].std() > 1e-8 else 1.0
+                } for col in meta_cols}
+                print("  - Metadata stats (for standardization) 計算完成")
+
+            train_dataset = DualTowerPairDataset(
+                train_df, tokenizer, max_len=512, # 根據新設計調整 max_len
+                apply_content_cleaning=config.APPLY_CONTENT_CLEANING,
+                include_metadata=config.EXTRACT_METADATA,
+                metadata_type=config.METADATA_TYPE,
+                include_prompt=config.INCLUDE_PROMPT,
+                use_lexrank_q=config.USE_FASTLEXRANK_FOR_QUESTION,
+                lexrank_q_lower_bound=config.FASTLEXRANK_QUESTION_TOKEN_LOWER_BOUND,
+                use_lexrank_r=config.USE_FASTLEXRANK_FOR_RESPONSE,
+                lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND,
+                standardize_metadata=True,
+                metadata_stats=getattr(config, 'METADATA_STATS', None)
+            )
+            val_dataset = DualTowerPairDataset(
+                val_df, tokenizer, max_len=512, # 根據新設計調整 max_len
+                apply_content_cleaning=config.APPLY_CONTENT_CLEANING,
+                include_metadata=config.EXTRACT_METADATA,
+                metadata_type=config.METADATA_TYPE,
+                include_prompt=config.INCLUDE_PROMPT,
+                use_lexrank_q=config.USE_FASTLEXRANK_FOR_QUESTION,
+                lexrank_q_lower_bound=config.FASTLEXRANK_QUESTION_TOKEN_LOWER_BOUND,
+                use_lexrank_r=config.USE_FASTLEXRANK_FOR_RESPONSE,
+                lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND,
+                standardize_metadata=True,
+                metadata_stats=getattr(config, 'METADATA_STATS', None)
+            )
+            class_weights = compute_class_weight(
+                'balanced',
+                classes=np.unique(train_df['label']),
+                y=train_df['label']
+            )
+            class_weights_dict = {i: w for i, w in enumerate(class_weights)}
+            val_labels  = val_df['label'].tolist()
+            val_indices = val_df.index.tolist()
+            return train_dataset, val_dataset, val_labels, val_indices, class_weights_dict
+        else:
+            # ✂️ 原來的 EnhancedPipelineModules 路徑保持不動
+            return EnhancedPipelineModules.create_enhanced_datasets(df, tokenizer, config)
+        
     @staticmethod
     def setup_trainer(model, train_dataset, val_dataset, class_weights_dict, config: Config):
         """Configures and returns a Trainer instance."""
         print("\n[Module 4/5] Setting up trainer...")
+        total_steps  = (len(train_dataset) // config.TRAIN_BATCH_SIZE) * config.EPOCHS
+        warmup_steps = int(total_steps * config.WARMUP_RATIO)
 
         training_args = TrainingArguments(
             output_dir=config.OUTPUT_DIR,
@@ -185,7 +281,7 @@ class PipelineModules:
             per_device_train_batch_size=config.TRAIN_BATCH_SIZE,
             per_device_eval_batch_size=config.EVAL_BATCH_SIZE,
             weight_decay=config.WEIGHT_DECAY,
-            warmup_steps=config.WARMUP_STEPS,
+            warmup_steps=warmup_steps,
             logging_dir=config.LOGGING_DIR,
             logging_steps=config.LOGGING_STEPS,
             eval_strategy="steps",
@@ -200,7 +296,7 @@ class PipelineModules:
             dataloader_pin_memory=False,
             report_to="none",
             seed=config.RANDOM_STATE,
-            lr_scheduler_type="linear",
+            lr_scheduler_type=config.LR_SCHEDULER_TYPE,
         )
         
         def compute_metrics(eval_pred):
@@ -224,7 +320,7 @@ class PipelineModules:
             def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
                 labels = inputs.pop("labels")
                 outputs = model(**inputs)
-                logits = outputs.logits
+                logits = outputs["logits"] if isinstance(outputs, dict) else outputs.logits
                 
                 weights = torch.tensor(list(class_weights_dict.values()), device=logits.device, dtype=torch.float)
                 loss_fct = torch.nn.CrossEntropyLoss(weight=weights, label_smoothing=config.LABEL_SMOOTHING)
@@ -238,7 +334,7 @@ class PipelineModules:
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
             compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=3)])
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=10)])
         
         print("  - Trainer setup complete.")
         return trainer
@@ -250,28 +346,53 @@ class PipelineModules:
         
         if df_test is None:
             if not os.path.exists(config.TEST_PATH):
-                print("  - Test file not found, skipping inference.")                # For Kaggle code competitions, an empty test set in the first stage might require a dummy submission.
+                print("  - Test file not found, skipping inference.")
                 if config.IS_KAGGLE:
                      pd.DataFrame({'id': [], 'winner_model_a': [], 'winner_model_b': [], 'winner_tie': []}).to_csv(config.SUBMISSION_PATH, index=False)
                      print("  - Empty submission.csv created for Kaggle environment.")                
                      return
 
         def process_test_batch(test_df_chunk, tokenizer):
-            """Processes a single batch of test data using enhanced preprocessing."""
-            # 為批次數據提取元數據特徵
-            if config.EXTRACT_METADATA:
-                from preprocessing.metadata_features import MetadataFeatures
-                test_df_chunk = MetadataFeatures.add_metadata_features_to_dataframe(
-                    test_df_chunk, feature_type=config.METADATA_TYPE
+            """Processes a single batch of test data using the appropriate dataset for the model architecture."""
+            from preprocessing.metadata_features import MetadataFeatures
+
+            # 根據模型架構選擇正確的 Dataset
+            if config.MODEL_ARCH == 'dual':
+                # 如果啟用，為測試集添加 metadata
+                if config.EXTRACT_METADATA:
+                    test_df_chunk = MetadataFeatures.add_metadata_features_to_dataframe(
+                        test_df_chunk, feature_type=config.METADATA_TYPE
+                    )
+                # 雙塔模型需要 Prompt, A, B 分開
+                test_dataset = DualTowerPairDataset(
+                    dataframe=test_df_chunk,
+                    tokenizer=tokenizer,
+                    max_len=512, # 應與訓練時一致
+                    apply_content_cleaning=config.APPLY_CONTENT_CLEANING,
+                    include_metadata=config.EXTRACT_METADATA, # 傳遞開關
+                    metadata_type=config.METADATA_TYPE,      # 傳遞類型
+                    include_prompt=config.INCLUDE_PROMPT,
+                    use_lexrank_q=config.USE_FASTLEXRANK_FOR_QUESTION,
+                    lexrank_q_lower_bound=config.FASTLEXRANK_QUESTION_TOKEN_LOWER_BOUND,
+                    use_lexrank_r=config.USE_FASTLEXRANK_FOR_RESPONSE,
+                    lexrank_r_lower_bound=config.FASTLEXRANK_RESPONSE_TOKEN_LOWER_BOUND,
+                    standardize_metadata=True,
+                    metadata_stats=getattr(config, 'METADATA_STATS', None)
+                )
+            else:
+                # Cross-encoder 模型使用統一輸入
+                if config.EXTRACT_METADATA:
+                    from preprocessing.metadata_features import MetadataFeatures
+                    test_df_chunk = MetadataFeatures.add_metadata_features_to_dataframe(
+                        test_df_chunk, feature_type=config.METADATA_TYPE
+                    )
+                test_dataset = EnhancedTestDataset(
+                    dataframe=test_df_chunk,
+                    tokenizer=tokenizer,
+                    include_metadata=config.EXTRACT_METADATA,
+                    metadata_type=config.METADATA_TYPE
                 )
             
-            # 使用 EnhancedTestDataset 確保測試階段也使用統一輸入構建策略
-            test_dataset = EnhancedTestDataset(
-                dataframe=test_df_chunk,
-                tokenizer=tokenizer,
-                include_metadata=config.EXTRACT_METADATA,
-                metadata_type=config.METADATA_TYPE
-            )
             preds = trainer.predict(test_dataset)
             probs = torch.nn.functional.softmax(torch.from_numpy(preds.predictions), dim=-1).numpy()
             return probs
@@ -328,6 +449,145 @@ class PipelineModules:
             dummy_sub.to_csv(config.SUBMISSION_PATH, index=False)
 
 # --------------------------------------------------------------------------
+# 2. Simplified Model Saving with Proper Config Handling
+# --------------------------------------------------------------------------
+def maybe_save_global_best(val_loss, val_acc, trainer, tokenizer, config, extra_info=None):
+    """
+    比較目前 val_loss 與歷史最佳；若更好就覆蓋 global_best_model/ 並保存完整配置
+    """
+    best_dir = pathlib.Path(config.GLOBAL_BEST_DIR)
+    best_json = best_dir / "metrics.json"
+
+    # 讀取舊紀錄
+    old_loss = None
+    if best_json.exists():
+        try:
+            with open(best_json, "r") as f:
+                old_loss = json.load(f)["log_loss"]
+        except Exception:
+            pass
+
+    if (old_loss is None) or (val_loss < old_loss - 1e-6):
+        print(f"🎉  New global best!  LogLoss {val_loss:.6f}" + (f"  < {old_loss:.6f}" if old_loss else ""))
+        
+        # 清理並創建目錄
+        if best_dir.exists():
+            shutil.rmtree(best_dir)
+        best_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 保存模型和tokenizer（這會自動保存原始的config.json）
+        print("  - 保存模型權重和配置...")
+        trainer.save_model(best_dir)
+        tokenizer.save_pretrained(best_dir)
+        
+        # 手動保存我們自定義模型的config.json（如果不存在）
+        config_path = best_dir / "config.json"
+        if not config_path.exists() and hasattr(trainer.model, 'config'):
+            print("  - 手動保存自定義模型的config.json...")
+            import json
+            with open(config_path, 'w') as f:
+                json.dump(trainer.model.config.to_dict(), f, indent=2)
+            print(f"    💾 Config.json已保存: {config_path}")
+        
+        # 保存metadata統計參數（如果啟用）
+        metadata_stats = None
+        if config.EXTRACT_METADATA:
+            print("  - 計算並保存metadata統計參數 (train + val)...")
+            # 針對 train 與 val 兩個子集的 union 來計算，較能代表完整資料分布
+            train_ds = trainer.train_dataset if hasattr(trainer, 'train_dataset') else None
+            val_ds   = trainer.eval_dataset  if hasattr(trainer, 'eval_dataset')  else None
+            metadata_stats = save_training_metadata_stats(train_ds, val_ds, best_dir)
+        
+        # 保存訓練配置和指標
+        metrics = {
+            "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+            "log_loss": float(val_loss),
+            "accuracy": float(val_acc),
+            "model_arch": config.MODEL_ARCH,
+            "hyperparams": {
+                "learning_rate": config.LEARNING_RATE,
+                "weight_decay": config.WEIGHT_DECAY,
+                "label_smoothing": config.LABEL_SMOOTHING,
+                "epochs": config.EPOCHS,
+                "batch_size": config.TRAIN_BATCH_SIZE,
+                "max_len": 512,
+                "warmup_ratio": getattr(config, "WARMUP_RATIO", None),
+                "lr_scheduler": trainer.args.lr_scheduler_type,
+            },
+            "preprocessing_config": {
+                "extract_metadata": config.EXTRACT_METADATA,
+                "metadata_type": config.METADATA_TYPE if config.EXTRACT_METADATA else None,
+                "apply_content_cleaning": config.APPLY_CONTENT_CLEANING,
+                "remove_special_blocks": getattr(config, 'REMOVE_SPECIAL_BLOCKS', True),
+                "include_prompt": config.INCLUDE_PROMPT,
+            }
+        }
+        
+        if extra_info:
+            metrics.update(extra_info)
+        
+        if metadata_stats:
+            metrics["metadata_stats"] = metadata_stats
+        
+        # 保存metrics.json
+        with open(best_json, "w") as f:
+            json.dump(metrics, f, indent=2)
+        
+        # 驗證保存的文件
+        print(f"✅ 模型完整保存至: {best_dir}")
+        saved_files = sorted([f.name for f in best_dir.iterdir()])
+        print(f"📁 保存的文件: {', '.join(saved_files)}")
+        
+        # 檢查關鍵文件
+        required_files = ['config.json', 'model.safetensors']
+        if config.EXTRACT_METADATA:
+            required_files.append('metadata_stats.json')
+        
+        missing_files = [f for f in required_files if not (best_dir / f).exists()]
+        if missing_files:
+            print(f"⚠️  警告：缺少關鍵文件: {missing_files}")
+        else:
+            print(f"✅ 所有關鍵文件都已保存")
+
+def save_training_metadata_stats(train_dataset, val_dataset, save_dir):
+    """從 train+val 數據集中提取並保存 metadata 統計參數"""
+    # 收集可用的 DataFrame
+    frames = []
+    for ds in (train_dataset, val_dataset):
+        if ds is not None and hasattr(ds, 'df'):
+            frames.append(ds.df)
+    if not frames:
+        print("    ⚠️  無可用資料集，跳過 metadata 統計計算")
+        return None
+
+    df_all = pd.concat(frames, axis=0, ignore_index=True)
+
+    # 取得特徵欄位
+    metadata_cols = train_dataset.metadata_cols if train_dataset and hasattr(train_dataset, 'metadata_cols') else []
+    if not metadata_cols or not all(col in df_all.columns for col in metadata_cols):
+        print("    ⚠️  找不到完整的 metadata 特徵列，跳過統計保存")
+        return None
+
+    metadata_stats = {}
+    for col in metadata_cols:
+        metadata_stats[col] = {
+            'mean': float(df_all[col].mean()),
+            'std': float(df_all[col].std()),
+            'min': float(df_all[col].min()),
+            'max': float(df_all[col].max())
+        }
+
+    # 保存統計參數
+    stats_path = save_dir / 'metadata_stats.json'
+    with open(stats_path, 'w') as f:
+        json.dump(metadata_stats, f, indent=2)
+
+    print(f"    💾 Metadata統計參數已保存: {stats_path}")
+    print(f"    📊 保存的特徵: {list(metadata_stats.keys())}")
+
+    return metadata_stats
+
+# --------------------------------------------------------------------------
 # 3. Main Execution Flow
 # --------------------------------------------------------------------------
 def main():
@@ -370,7 +630,9 @@ def main():
     print(f"  - Log Loss:   {val_final_loss:.6f}")
     print(f"  - Accuracy:   {val_final_acc:.4f}")
     print(f"{'='*60}\n")
-    
+
+    maybe_save_global_best(val_final_loss, val_final_acc, trainer, tokenizer, config)
+
     # Save validation results for analysis
     val_results = pd.DataFrame({
         "id": df.loc[val_indices, "id"],
@@ -386,6 +648,59 @@ def main():
     PipelineModules.run_inference_and_save(trainer, df_test, tokenizer, config)
 
     print("\nPipeline finished successfully!")
+
+# --------------------------------------------------------------------------
+# 4. 讓 Optuna 可以單次呼叫的包裝器
+#    －－放在 fine_tuning.py 最後面即可－－
+# --------------------------------------------------------------------------
+def run_once_with_config(config):
+    """
+    執行一次完整 pipeline，並回傳 (logloss, accuracy) 供 Optuna 評估。
+    參數
+    ----
+    config : Config
+        已填好超參數的設定物件（同 bayes_opt 內自行修改後的 cfg）
+    回傳
+    ----
+    (logloss : float, accuracy : float)
+    """
+    # === Step 1: Load & preprocess data ===
+    df, df_test = PipelineModules.load_and_preprocess_data(config)
+
+    # === Step 2: Load model & tokenizer ===
+    tokenizer, model, _ = PipelineModules.load_model_and_tokenizer(config)
+
+    # === Step 3: Create datasets ===
+    train_ds, val_ds, val_labels, _, class_wts = PipelineModules.create_datasets(
+        df, tokenizer, config
+    )
+
+    # === Step 4: Trainer ===
+    trainer = PipelineModules.setup_trainer(
+        model, train_ds, val_ds, class_wts, config
+    )
+
+    # === Step 5: Train ===
+    trainer.train()
+
+    # === Step 6: Eval on validation set ===
+    val_pred = trainer.predict(val_ds)
+    val_probs = torch.nn.functional.softmax(
+        torch.from_numpy(val_pred.predictions), dim=-1
+    ).numpy()
+    val_probs = np.clip(val_probs, 1e-7, 1 - 1e-7)
+
+    logloss = log_loss(val_labels, val_probs)
+    acc     = accuracy_score(val_labels, np.argmax(val_probs, axis=1))
+
+    # 讓外部（Optuna）可以拿到最佳 checkpoint 路徑
+    trainer.save_model(config.OUTPUT_DIR)              # 確保有存
+    run_once_with_config.best_ckpt_dir = trainer.state.best_model_checkpoint
+
+    maybe_save_global_best(logloss, acc, trainer, tokenizer, config,
+                       extra_info={"trial_id": getattr(config, "OPTUNA_TRIAL_ID", None)})
+
+    return logloss, acc
 
 if __name__ == "__main__":
     main()
