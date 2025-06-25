@@ -54,11 +54,9 @@ NCKU_Data_Mining_Final_Project/
 
 ## 快速開始
 
-### 1. 環境準備
-```bash
-pip install torch transformers pandas numpy scikit-learn safetensors tqdm
-# 可選：pip install fastlexrank（文本摘要）
-```
+### 1. APP使用
+[下載連接](https://drive.google.com/file/d/1ksKbd604Zq1rWolFB5sZQg8oNpIgO0da/view?usp=sharing)
+下載後解壓縮，雙擊setup.bat檔
 
 ### 2. 模型訓練
 ```bash
@@ -197,20 +195,9 @@ def extract_core_features(row: pd.Series) -> Dict[str, float]:
 #### 訓練問題與解決
 - **過擬合**：早停 + 權重衰減 + Dropout
 - **收斂緩慢**：餘弦學習率調度 + Warmup 加速收斂
-- **記憶體限制**：批次大小8，梯度累積支援更大有效批次
+- **記憶體限制**：批次大小8，梯度累積支援更大有效批次 
 
-### Literature 文獻回顧
-
-
-#### 相關技術應用
-**雙塔架構**廣泛應用於：
-- **推薦系統**：用戶-物品雙塔匹配（YouTube DNN, 2016）
-- **資訊檢索**：查詢-文檔相似度計算（BERT-based retrievers）
-- **文本匹配**：句子對相似度判斷（Sentence-BERT, 2019）
-
-**本專案差異**：首次將雙塔架構應用於多元偏好建模，結合結構化元數據特徵
-
-#### 任務創新性
+### 任務創新性
 **半新穎任務**：LLM評估為新興領域，但本專案在以下方面有所創新：
 1. **架構創新**：雙塔+元數據融合在偏好建模中的首次應用
 2. **特徵工程**：針對LLM回應特性設計的結構化特徵
